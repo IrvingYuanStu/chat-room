@@ -47,7 +47,45 @@
 
 ## 🚀 快速开始
 
-### 环境要求
+### 前置要求
+
+- **Node.js** >= v16
+- **ZooKeeper** >= v3.6（需要可访问的 ZooKeeper 服务）
+
+### 一键安装（推荐）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yourusername/chat-room/main/install.sh | bash
+```
+
+安装脚本会自动：
+- 检查 Node.js 环境
+- 克隆代码仓库
+- 安装依赖并编译
+- 生成配置文件
+- 配置 ZooKeeper 地址
+
+### 快速安装（已有 ZooKeeper）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yourusername/chat-room/main/quick-install.sh | bash
+```
+
+### Docker 部署
+
+```bash
+# 克隆仓库
+git clone https://github.com/yourusername/chat-room.git
+cd chat-room
+
+# 配置 ZooKeeper 地址
+echo "ZK_ADDRESS=your-zk-host:2181" > .env
+
+# 启动容器
+docker-compose up -d
+```
+
+### 手动安装
 
 - **Node.js**: >= 22.0.0
 - **ZooKeeper**: 3.5.9 或更高版本
