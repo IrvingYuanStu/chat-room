@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Chat Room Node.js Client Installation Script
-# Usage: curl -fsSL https://raw.githubusercontent.com/yourusername/chat-room/main/install.sh | bash
+# Usage: curl -fsSL hhttps://github.com/IrvingYuanStu/chat-room/main/install.sh | bash
 
 set -e
 

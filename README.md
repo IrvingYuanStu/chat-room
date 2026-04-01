@@ -47,39 +47,35 @@
 
 ## 🚀 快速开始
 
-### 方式 1: 下载二进制（最简单，无需 Node.js）
-
-访问 [Releases 页面](https://github.com/yourusername/chat-room/releases) 下载对应平台的可执行文件。
-
-```bash
-# macOS
-curl -L https://github.com/yourusername/chat-room/releases/latest/download/chat-room-macos-x64.tar.gz | tar xz
-chmod +x chat-room-macos
-./chat-room-macos
-
-# Linux
-curl -L https://github.com/yourusername/chat-room/releases/latest/download/chat-room-linux-x64.tar.gz | tar xz
-chmod +x chat-room-linux
-./chat-room-linux
-
-# Windows
-# 下载并解压 chat-room-win-x64.zip 后运行
-chat-room-win.exe
-```
-
-### 方式 2: 一键安装脚本（需要 Node.js）
+### 方式 1: 一键安装（推荐）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yourusername/chat-room/main/install.sh | bash
 ```
 
-### 方式 3: Docker 部署
+**前置要求：** Node.js >= v16 和 ZooKeeper 服务
+
+安装脚本会自动：
+- ✅ 检查 Node.js 环境
+- ✅ 克隆代码仓库
+- ✅ 安装依赖并编译
+- ✅ 生成配置文件
+- ✅ 配置 ZooKeeper 地址
+
+### 方式 2: Docker 部署
 
 ```bash
 git clone https://github.com/yourusername/chat-room.git
 cd chat-room
 echo "ZK_ADDRESS=your-zk-host:2181" > .env
 docker-compose up -d
+```
+
+### 方式 3: NPM 全局安装
+
+```bash
+npm install -g chat-room
+chat-room
 ```
 
 ### 方式 4: 手动安装

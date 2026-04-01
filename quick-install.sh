@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Quick Install Script - Clone and Setup
-# Usage: curl -fsSL https://raw.githubusercontent.com/yourusername/chat-room/main/quick-install.sh | bash
+# Usage: curl -fsSL https://github.com/IrvingYuanStu/chat-room/main/quick-install.sh | bash
 
 set -e
 
