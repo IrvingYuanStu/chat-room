@@ -1,0 +1,18 @@
+{
+  "name": "chat-room",
+  "version": "0.1.0",
+  "bin": "dist/index.js",
+  "outputPath": "binaries",
+  "targets": [
+    "node18-macos-x64",
+    "node18-linux-x64",
+    "node18-win-x64"
+  ],
+  "assets": [
+    "package.json"
+  ],
+  "scripts": [
+    "dist/**/*.js"
+  ],
+  "outputPattern": "<name>-<version>-<platform>-<arch>"
+}

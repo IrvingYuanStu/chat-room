@@ -10,18 +10,15 @@
     "chat-room": "./dist/index.js"
   },
   "scripts": {
-    "dev": "tsx src/index.tsx",
-    "build": "tsc",
-    "start": "node dist/index.js",
-    "test": "vitest",
-    "lint": "eslint src/"
-  },
-  "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "package": "npm run build && pkg .",
+    "package:macos": "npm run build && pkg . --targets node18-macos-x64 --output ./binaries/chat-room-macos",
+    "package:linux": "npm run build && pkg . --targets node18-linux-x64 --output ./binaries/chat-room-linux",
+    "package:win": "npm run build && pkg . --targets node18-win-x64 --output ./binaries/chat-room-win.exe"
   },
   "keywords": [],
   "author": "",
@@ -40,6 +37,7 @@
     "@types/node-zookeeper-client": "^1.1.0",
     "@types/react": "^18.3.28",
     "@types/uuid": "^10.0.0",
+    "pkg": "^5.8.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"
