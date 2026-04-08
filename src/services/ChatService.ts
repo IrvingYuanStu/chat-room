@@ -1,232 +1,267 @@
-import { v4 as uuidv4 } from "uuid";
-import type { ChatMessage, P2PProtocolMessage, UserId, ReplyToInfo } from "./types.js";
-import { HistoryService } from "./HistoryService.js";
-import { PeerService } from "./PeerService.js";
-import { MentionService } from "./MentionService.js";
-import { ConfigService } from "./ConfigService.js";
-import { MemberService } from "./MemberService.js";
-import { eventBus } from "./EventBus.js";
+/**
+ * Chat Service
+ * Handles message sending, receiving, broadcasting, and formatting
+ */
+
+import { v4 as uuidv4 } from 'uuid';
+import {
+  ChatMessage,
+  ReplyInfo,
+  P2PMessage,
+  ChatPayload,
+  MessageType,
+} from './types';
+import { PeerService } from './PeerService';
+import { EventBus } from './EventBus';
+
+export interface ChatServiceConfig {
+  userId: string;
+  nickname: string;
+  roomId: string;
+}
+
+// Interface for member status checking (to avoid circular dependencies)
+export interface MemberStatusChecker {
+  isOnline: (userId: string) => boolean;
+  getMember: (userId: string) => { userId: string; nickname: string; status: 'online' | 'offline' } | undefined;
+}
 
 export class ChatService {
+  private peerService: PeerService;
+  private eventBus: EventBus;
+  private userId: string;
+  private nickname: string;
+  private roomId: string;
+
   constructor(
-    private historyService: HistoryService,
-    private peerService: PeerService,
-    private mentionService: MentionService,
-    private configService: ConfigService,
-    private memberService: MemberService,
-  ) {}
+    peerService: PeerService,
+    eventBus: EventBus,
+    config: ChatServiceConfig
+  ) {
+    this.peerService = peerService;
+    this.eventBus = eventBus;
+    this.userId = config.userId;
+    this.nickname = config.nickname;
+    this.roomId = config.roomId;
+  }
 
   /**
-   * Send a message to current room
+   * Get the current user ID
    */
-  async send(roomId: string, content: string, replyTo?: ReplyToInfo): Promise<void> {
-    const userId = this.configService.getUserId();
-    const nickname = this.configService.getNickname();
+  getUserId(): string {
+    return this.userId;
+  }
 
-    // Parse mentions
-    const members = this.memberService.getMembers(roomId);
-    const mentions = this.mentionService.parseMentions(content, members);
+  /**
+   * Get the current nickname
+   */
+  getNickname(): string {
+    return this.nickname;
+  }
 
-    // Generate message
+  /**
+   * Get the current room ID
+   */
+  getRoomId(): string {
+    return this.roomId;
+  }
+
+  /**
+   * Update the nickname
+   * @param newNickname The new nickname to use
+   */
+  async updateNickname(newNickname: string): Promise<void> {
+    this.nickname = newNickname;
+  }
+
+  /**
+   * Send a message
+   * @param content The message content
+   * @param replyTo Optional reply information
+   * @param mentions Optional list of mentioned user IDs
+   */
+  async sendMessage(
+    content: string,
+    replyTo?: ReplyInfo,
+    mentions?: string[]
+  ): Promise<void> {
     const message: ChatMessage = {
       id: uuidv4(),
-      type: replyTo ? "reply" : "text",
-      senderId: userId,
-      senderNickname: nickname,
+      type: this.determineMessageType(mentions, replyTo),
+      roomId: this.roomId,
+      senderId: this.userId,
+      senderNickname: this.nickname,
       content,
-      roomId,
       timestamp: Date.now(),
-      mentions: mentions.length > 0 ? mentions : undefined,
       replyTo,
+      mentions,
     };
 
-    // Persist to history
-    await this.historyService.appendMessage(message);
+    // Save to local history (if HistoryService is available)
+    this.saveToHistory(message);
 
-    // Emit event for UI
-    eventBus.emit("new-message", message);
+    // Publish message event for local rendering
+    this.eventBus.publish('message', message);
 
-    // Broadcast to peers
-    const protocolMsg: P2PProtocolMessage = {
-      version: 1,
-      type: "chat",
-      payload: message,
+    // Broadcast to all peers via P2P
+    this.broadcastP2PMessage(message);
+  }
+
+  /**
+   * Broadcast a chat message to all connected peers
+   * @param message The chat message to broadcast
+   */
+  broadcast(message: ChatMessage): void {
+    try {
+      this.broadcastP2PMessage(message);
+    } catch (error) {
+      // Log error but don't throw - broadcast should be resilient
+      console.error('Failed to broadcast message:', error);
+    }
+  }
+
+  /**
+   * Broadcast a P2P message to all connected peers
+   * @param message The chat message to broadcast
+   */
+  private broadcastP2PMessage(message: ChatMessage): void {
+    const payload: ChatPayload = {
+      messageId: message.id,
+      content: message.content,
+      replyTo: message.replyTo
+        ? {
+            originalMessageId: message.replyTo.originalMessageId,
+            originalSenderNickname: message.replyTo.originalSenderNickname,
+            originalContent: message.replyTo.originalContent,
+          }
+        : undefined,
+      mentions: message.mentions,
+    };
+
+    const p2pMessage: P2PMessage = {
+      type: 'chat',
+      senderId: message.senderId,
+      senderNickname: message.senderNickname,
+      roomId: message.roomId,
       timestamp: message.timestamp,
-      senderId: userId,
+      payload,
     };
 
-    this.peerService.broadcast(roomId, protocolMsg);
+    this.peerService.broadcast(p2pMessage);
+  }
 
-    // Check for offline mentions and show warning
-    const offlineMentions = this.mentionService.hasOfflineMention(roomId, mentions);
-    if (offlineMentions.length > 0) {
-      const offlineNicknames = offlineMentions.map((m) => m.nickname).join(", ");
-      const warningMsg: ChatMessage = {
-        id: uuidv4(),
-        type: "system",
-        senderId: "system",
-        senderNickname: "系统",
-        content: `用户 "${offlineNicknames}" 当前离线，消息可能无法送达`,
-        roomId,
-        timestamp: Date.now(),
-      };
+  /**
+   * Save message to local history
+   * This is a placeholder that can be extended when HistoryService is implemented
+   * @param message The message to save
+   */
+  private saveToHistory(message: ChatMessage): void {
+    // HistoryService will be integrated here
+    // For now, this is a no-op placeholder
+  }
 
-      await this.historyService.appendMessage(warningMsg);
-      eventBus.emit("new-message", warningMsg);
+  /**
+   * Determine the message type based on mentions and reply info
+   * @param mentions List of mentioned user IDs
+   * @param replyTo Reply information
+   * @returns The determined message type
+   */
+  private determineMessageType(
+    mentions?: string[],
+    replyTo?: ReplyInfo
+  ): MessageType {
+    if (replyTo) {
+      return 'reply';
+    }
+    if (mentions && mentions.length > 0) {
+      return 'mention';
+    }
+    return 'normal';
+  }
+
+  /**
+   * Format a message for display
+   * @param message The chat message to format
+   * @returns Formatted message string
+   */
+  formatMessage(message: ChatMessage): string {
+    const time = this.formatTimestamp(message.timestamp);
+    const displayNickname =
+      message.senderNickname === this.nickname ? '我' : message.senderNickname;
+
+    switch (message.type) {
+      case 'system':
+        return `${time} 系统: ${message.content}`;
+
+      case 'reply':
+        if (message.replyTo) {
+          // Format: [HH:mm:ss] 昵称 [回复 原发送者: 原内容]: 回复内容
+          return `${time} ${displayNickname} [回复 ${message.replyTo.originalSenderNickname}: ${message.replyTo.originalContent}]: ${message.content}`;
+        }
+        return `${time} ${displayNickname}: ${message.content}`;
+
+      case 'mention':
+        const mentionStr = message.mentions
+          ? message.mentions.map((m) => `@${m}`).join(' ')
+          : '';
+        return `${time} ${displayNickname}: ${mentionStr} ${message.content}`.trim();
+
+      case 'normal':
+      default:
+        return `${time} ${displayNickname}: ${message.content}`;
     }
   }
 
   /**
-   * Handle incoming P2P message
+   * Format timestamp to HH:mm:ss format
+   * @param timestamp Unix timestamp in milliseconds
+   * @returns Formatted time string with brackets
    */
-  async handleIncoming(roomId: string, protocolMsg: P2PProtocolMessage): Promise<void> {
-    if (protocolMsg.type === "chat") {
-      await this.handleChatMessage(roomId, protocolMsg);
-    } else if (protocolMsg.type === "join") {
-      await this.handleJoinMessage(roomId, protocolMsg);
-    } else if (protocolMsg.type === "leave") {
-      await this.handleLeaveMessage(roomId, protocolMsg);
-    } else if (protocolMsg.type === "rename") {
-      await this.handleRenameMessage(roomId, protocolMsg);
+  private formatTimestamp(timestamp: number): string {
+    const date = new Date(timestamp);
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    const seconds = date.getSeconds().toString().padStart(2, '0');
+    return `[${hours}:${minutes}:${seconds}]`;
+  }
+
+  /**
+   * Parse mentions from message content
+   * Extracts @username patterns from the content
+   * @param content The message content to parse
+   * @returns List of mentioned usernames
+   */
+  parseMentions(content: string): string[] {
+    const mentionRegex = /@(\S+)/g;
+    const mentions: string[] = [];
+    let match;
+
+    while ((match = mentionRegex.exec(content)) !== null) {
+      mentions.push(match[1]);
     }
+
+    return mentions;
   }
 
   /**
-   * Handle chat message
+   * M4.2.3 - Check for offline mentions and warn if necessary
+   * When sending a message with @ mentions, check if any mentioned members are offline
+   * and publish a warning if so
+   * @param mentions List of mentioned user IDs
+   * @param memberStatusChecker Object that can check member online status
    */
-  private async handleChatMessage(roomId: string, protocolMsg: P2PProtocolMessage): Promise<void> {
-    const message = protocolMsg.payload as ChatMessage;
-
-    // Validate room ID
-    if (message.roomId !== roomId) {
-      console.warn(`Received message for wrong room: ${message.roomId} (expected ${roomId})`);
-      return;
+  checkOfflineMentions(
+    mentions: string[],
+    memberStatusChecker: MemberStatusChecker
+  ): void {
+    for (const userId of mentions) {
+      const member = memberStatusChecker.getMember(userId);
+      if (member && !memberStatusChecker.isOnline(userId)) {
+        // Publish warning for offline member
+        this.eventBus.publish('warning', {
+          message: `给离线成员 ${member.nickname} 发送的消息可能无法送达`,
+        });
+      }
     }
-
-    // Persist to history
-    await this.historyService.appendMessage(message);
-
-    // Emit event for UI
-    eventBus.emit("new-message", message);
-  }
-
-  /**
-   * Handle join message
-   */
-  private async handleJoinMessage(roomId: string, protocolMsg: P2PProtocolMessage): Promise<void> {
-    const payload = protocolMsg.payload as { userId: UserId; nickname: string };
-
-    // Add member
-    this.memberService.addMember(roomId, {
-      userId: payload.userId,
-      nickname: payload.nickname,
-      status: "online",
-      address: { ip: "", port: 0 }, // Will be filled by actual connection
-      joinedAt: Date.now(),
-    });
-
-    // Generate system message
-    const systemMsg: ChatMessage = {
-      id: uuidv4(),
-      type: "join",
-      senderId: "system",
-      senderNickname: "系统",
-      content: `${payload.nickname} 加入了聊天室`,
-      roomId,
-      timestamp: Date.now(),
-    };
-
-    await this.historyService.appendMessage(systemMsg);
-    eventBus.emit("new-message", systemMsg);
-  }
-
-  /**
-   * Handle leave message
-   */
-  private async handleLeaveMessage(roomId: string, protocolMsg: P2PProtocolMessage): Promise<void> {
-    const payload = protocolMsg.payload as { userId: UserId; nickname: string };
-
-    // Mark offline
-    this.memberService.markOffline(roomId, payload.userId);
-
-    // Generate system message
-    const systemMsg: ChatMessage = {
-      id: uuidv4(),
-      type: "leave",
-      senderId: "system",
-      senderNickname: "系统",
-      content: `${payload.nickname} 离开了聊天室`,
-      roomId,
-      timestamp: Date.now(),
-    };
-
-    await this.historyService.appendMessage(systemMsg);
-    eventBus.emit("new-message", systemMsg);
-  }
-
-  /**
-   * Handle rename message
-   */
-  private async handleRenameMessage(roomId: string, protocolMsg: P2PProtocolMessage): Promise<void> {
-    const payload = protocolMsg.payload as { userId: UserId; oldNickname: string; newNickname: string };
-
-    // Update nickname
-    this.memberService.updateNickname(roomId, payload.userId, payload.newNickname);
-
-    // Generate system message
-    const systemMsg: ChatMessage = {
-      id: uuidv4(),
-      type: "rename",
-      senderId: "system",
-      senderNickname: "系统",
-      content: `${payload.oldNickname} 修改昵称为 ${payload.newNickname}`,
-      roomId,
-      timestamp: Date.now(),
-    };
-
-    await this.historyService.appendMessage(systemMsg);
-    eventBus.emit("new-message", systemMsg);
-  }
-
-  /**
-   * Send rename message
-   */
-  async sendRename(roomId: string, oldNickname: string, newNickname: string): Promise<void> {
-    const userId = this.configService.getUserId();
-
-    const protocolMsg: P2PProtocolMessage = {
-      version: 1,
-      type: "rename",
-      payload: {
-        userId,
-        oldNickname,
-        newNickname,
-      },
-      timestamp: Date.now(),
-      senderId: userId,
-    };
-
-    this.peerService.broadcast(roomId, protocolMsg);
-  }
-
-  /**
-   * Send leave message
-   */
-  async sendLeave(roomId: string): Promise<void> {
-    const userId = this.configService.getUserId();
-    const nickname = this.configService.getNickname();
-
-    const protocolMsg: P2PProtocolMessage = {
-      version: 1,
-      type: "leave",
-      payload: {
-        userId,
-        nickname,
-      },
-      timestamp: Date.now(),
-      senderId: userId,
-    };
-
-    this.peerService.broadcast(roomId, protocolMsg);
   }
 }

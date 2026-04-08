@@ -1,236 +1,371 @@
-import { useEffect, useState } from "react";
-import { Box, Text } from "ink";
-import { ConfigScreen } from "./screens/ConfigScreen.js";
-import { RoomSelectScreen } from "./screens/RoomSelectScreen.js";
-import { ChatScreen } from "./screens/ChatScreen.js";
-import { ConfigService } from "../services/ConfigService.js";
-import { RoomService } from "../services/RoomService.js";
-import { ChatService } from "../services/ChatService.js";
-import { MemberService } from "../services/MemberService.js";
-import { MentionService } from "../services/MentionService.js";
-import { PeerService } from "../services/PeerService.js";
-import { HistoryService } from "../services/HistoryService.js";
-import { ZKClient } from "../network/ZKClient.js";
-import { eventBus } from "../services/EventBus.js";
-import type { AppConfig } from "../services/types.js";
+/**
+ * App Component - Main application component with screen routing
+ * M1.8.4: Route between ConfigScreen, RoomSelectScreen, and ChatScreen
+ */
 
-type Screen = "config" | "room-select" | "chat";
+import React, { useState, useEffect } from 'react';
+import { Box } from 'ink';
+import { Config, Member } from '../services/types';
+import { EventBus, getEventBus } from '../services/EventBus';
+import { ConfigScreen } from './screens/ConfigScreen';
+import { RoomSelectScreen } from './screens/RoomSelectScreen';
+import { ConnectionStatus } from './components/SystemBar';
+import { ChatScreen } from './screens/ChatScreen';
+import { ZKClient } from '../network/ZKClient';
+import { MemberService } from '../services/MemberService';
+import { RoomService, UserInfo } from '../services/RoomService';
+import { ChatService } from '../services/ChatService';
+import { P2PTransport } from '../network/P2PTransport';
+import { P2PServer } from '../network/P2PServer';
+import { PeerService } from '../services/PeerService';
+import { ChatMessage, P2PMessage, ChatPayload } from '../services/types';
 
-interface AppProps {
-  zkClient: ZKClient;
-  configService: ConfigService;
-  roomService: RoomService;
-  chatService: ChatService;
-  memberService: MemberService;
-  mentionService: MentionService;
-  peerService: PeerService;
-  historyService: HistoryService;
+export type Screen = 'config' | 'roomSelect' | 'chat';
+
+export interface AppProps {
+  initialConfig?: Partial<Config>;
+  /** ZooKeeper client instance */
+  zkClient?: ZKClient;
+  /** Callback to quit the entire application with full cleanup */
+  onQuitApp?: () => void;
+  /** Whether the app should handle quit internally (for CLI mode) */
+  internalQuit?: boolean;
 }
 
-export function App({
-  zkClient,
-  configService,
-  roomService,
-  chatService,
-  memberService,
-  mentionService,
-  peerService,
-  historyService,
-}: AppProps) {
-  const [screen, setScreen] = useState<Screen>("config");
-  const [config, setConfig] = useState<AppConfig | null>(null);
-  const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
-  const [isShuttingDown, setIsShuttingDown] = useState(false);
+export interface AppState {
+  screen: Screen;
+  config: Config | null;
+  currentRoomId: string | null;
+  connectionStatus: ConnectionStatus;
+  recentRooms: string[];
+  currentMembers: Member[];
+}
 
+// Generate a unique user ID for this instance
+function generateUserId(): string {
+  return `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
+/**
+ * App - Main application component with screen routing
+ */
+export const App: React.FC<AppProps> = ({ initialConfig, zkClient, onQuitApp, internalQuit = false }) => {
+  const [state, setState] = useState<AppState>({
+    screen: initialConfig ? 'roomSelect' : 'config',
+    config: initialConfig ? {
+      zkAddresses: initialConfig.zkAddresses || ['127.0.0.1:2181'],
+      currentRoomId: initialConfig.currentRoomId || '',
+      nickname: initialConfig.nickname || 'User001',
+      recentRooms: initialConfig.recentRooms || [],
+      port: initialConfig.port || 9001,
+      dataDir: initialConfig.dataDir || '/tmp/chat-room',
+      logDir: initialConfig.logDir || '/tmp/chat-room/logs',
+      logLevel: initialConfig.logLevel || 'info'
+    } : null,
+    currentRoomId: null,
+    connectionStatus: 'disconnected',
+    recentRooms: initialConfig?.recentRooms || [],
+    currentMembers: []
+  });
+
+  const eventBus = getEventBus();
+
+  // Initialize connection status from zkClient if already connected
+  // This handles the case where zkClient.connect() completed before App mounted
   useEffect(() => {
-    const initialize = async () => {
-      try {
-        // Load config
-        const loadedConfig = await configService.load();
-
-        if (!loadedConfig) {
-          // No config, show config screen
-          setScreen("config");
-          return;
-        }
-
-        setConfig(loadedConfig);
-
-        // Connect to ZK
-        await zkClient.connect(loadedConfig.zkAddresses);
-
-        // Check if there's a current room
-        if (loadedConfig.currentRoomId) {
-          setCurrentRoomId(loadedConfig.currentRoomId);
-          setScreen("chat");
-        } else {
-          setScreen("room-select");
-        }
-      } catch (err) {
-        console.error("Failed to initialize:", err);
-        // Show config screen on error
-        setScreen("config");
-      }
-    };
-
-    initialize();
-  }, [zkClient, configService]);
-
-  const handleConfigComplete = () => {
-    const loadedConfig = configService.getConfig();
-    if (loadedConfig) {
-      setConfig(loadedConfig);
-      setScreen("room-select");
+    if (zkClient && zkClient.isConnected()) {
+      setState(prev => ({ ...prev, connectionStatus: 'connected' }));
     }
-  };
+  }, [zkClient]);
 
-  const handleRoomJoined = async (roomId: string) => {
-    try {
-      setCurrentRoomId(roomId);
+  // Services - created when zkClient is available
+  const [memberService] = useState<MemberService | null>(() =>
+    zkClient ? new MemberService(eventBus, zkClient) : null
+  );
+  const [roomService, setRoomService] = useState<RoomService | null>(null);
+  const [userId] = useState<string>(() => generateUserId());
 
-      // Get config for peer info
-      const config = configService.getConfig();
-      if (!config) {
-        throw new Error("No config available");
-      }
+  // P2P Services
+  const [p2pTransport] = useState<P2PTransport>(() => new P2PTransport());
+  const [p2pServer] = useState<P2PServer>(() => new P2PServer(p2pTransport));
+  const [peerService, setPeerService] = useState<PeerService | null>(null);
+  const [chatService, setChatService] = useState<ChatService | null>(null);
 
-      // Set local peer info
-      peerService.setLocalInfo(
-        config.userId,
-        config.nickname,
-        roomId,
-        { ip: "127.0.0.1", port: config.p2pPort }
-      );
-
-      // Start P2P server
-      const port = config.p2pPort;
-      await peerService.startServer(port);
-
-      setScreen("chat");
-    } catch (err) {
-      console.error("Failed to join room:", err);
-    }
-  };
-
-  const handleExitRoom = async () => {
-    try {
-      if (currentRoomId) {
-        await roomService.leaveRoom(currentRoomId);
-      }
-      setCurrentRoomId(null);
-      setScreen("room-select");
-    } catch (err) {
-      console.error("Failed to exit room:", err);
-    }
-  };
-
-  const handleQuit = async () => {
-    setIsShuttingDown(true);
-    try {
-      // Leave current room if in one
-      if (currentRoomId) {
-        await chatService.sendLeave(currentRoomId);
-        await peerService.disconnectAll(currentRoomId);
-        await zkClient.leaveRoom(currentRoomId, configService.getNickname());
-      }
-
-      // Cleanup old messages
-      if (currentRoomId) {
-        await historyService.cleanupOldMessages(currentRoomId);
-      }
-
-      // Save config
-      await configService.save();
-
-      // Stop P2P server
-      await peerService.stopServer();
-
-      // Disconnect ZK
-      await zkClient.disconnect();
-
-      // Exit process
-      process.exit(0);
-    } catch (err) {
-      console.error("Error during shutdown:", err);
-      process.exit(1);
-    }
-  };
-
-  // Handle SIGINT/SIGTERM for graceful shutdown
+  // Initialize RoomService when zkClient and config are available
   useEffect(() => {
-    const handleSignal = async () => {
-      await handleQuit();
-    };
+    if (zkClient && state.config && memberService && !roomService) {
+      const userInfo: UserInfo = {
+        userId: userId,
+        nickname: state.config.nickname || 'User001',
+        ip: '127.0.0.1',
+        port: state.config.port || 9001
+      };
+      const rs = new RoomService(zkClient, memberService, eventBus, userInfo);
+      setRoomService(rs);
+    }
+  }, [zkClient, state.config, memberService, roomService, userId, eventBus]);
 
-    process.on("SIGINT", handleSignal);
-    process.on("SIGTERM", handleSignal);
+  // Subscribe to events
+  useEffect(() => {
+    const unsubscribeZKConnected = eventBus.subscribe('zk_connected', () => {
+      setState(prev => ({ ...prev, connectionStatus: 'connected' }));
+    });
+
+    const unsubscribeZKDisconnected = eventBus.subscribe('zk_disconnected', () => {
+      setState(prev => ({ ...prev, connectionStatus: 'disconnected' }));
+    });
+
+    const unsubscribeZKReconnecting = eventBus.subscribe('zk_reconnected', () => {
+      setState(prev => ({ ...prev, connectionStatus: 'connected' }));
+    });
+
+    // Subscribe to member events to update currentMembers
+    const unsubscribeMemberJoin = eventBus.subscribe('member_join', (member: Member) => {
+      setState(prev => {
+        const exists = prev.currentMembers.some(m => m.userId === member.userId);
+        if (exists) {
+          return {
+            ...prev,
+            currentMembers: prev.currentMembers.map(m => m.userId === member.userId ? member : m)
+          };
+        }
+        return {
+          ...prev,
+          currentMembers: [...prev.currentMembers, member]
+        };
+      });
+    });
+
+    const unsubscribeMemberLeave = eventBus.subscribe('member_leave', ({ userId: leaveUserId }: { userId: string }) => {
+      setState(prev => ({
+        ...prev,
+        currentMembers: prev.currentMembers.filter(m => m.userId !== leaveUserId)
+      }));
+    });
 
     return () => {
-      process.off("SIGINT", handleSignal);
-      process.off("SIGTERM", handleSignal);
+      unsubscribeZKConnected();
+      unsubscribeZKDisconnected();
+      unsubscribeZKReconnecting();
+      unsubscribeMemberJoin();
+      unsubscribeMemberLeave();
     };
-  }, [currentRoomId]);
+  }, [eventBus]);
 
-  if (isShuttingDown) {
-    return (
-      <Box paddingX={2}>
-        <Text>
-          <Text color="yellow">正在关闭...</Text>
-        </Text>
-      </Box>
-    );
-  }
-
-  if (screen === "config") {
-    return <ConfigScreen configService={configService} existingConfig={config} onComplete={handleConfigComplete} />;
-  }
-
-  if (screen === "room-select") {
-    if (!config) {
-      return (
-        <Box paddingX={2}>
-          <Text color="red">错误: 配置未加载</Text>
-        </Box>
-      );
+  // Start P2P server when config is available
+  useEffect(() => {
+    if (state.config) {
+      const port = state.config.port || 9001;
+      p2pServer.start(port).catch((error) => {
+        console.error('Failed to start P2P server:', error);
+      });
     }
 
-    return (
-      <RoomSelectScreen
-        roomService={roomService}
-        recentRooms={config.recentRooms}
-        onRoomJoined={handleRoomJoined}
-      />
-    );
-  }
+    return () => {
+      p2pServer.stop().catch(console.error);
+    };
+  }, [state.config, p2pServer]);
 
-  if (screen === "chat") {
-    if (!currentRoomId) {
-      return (
-        <Box paddingX={2}>
-          <Text color="red">错误: 未选择聊天室</Text>
-        </Box>
-      );
+  // Create PeerService when we have the server info
+  useEffect(() => {
+    if (state.config) {
+      const port = state.config.port || 9001;
+      const ps = new PeerService(p2pTransport, '127.0.0.1', port);
+      setPeerService(ps);
     }
+  }, [state.config, p2pTransport]);
 
-    return (
-      <ChatScreen
-        roomId={currentRoomId}
-        roomService={roomService}
-        chatService={chatService}
-        memberService={memberService}
-        mentionService={mentionService}
-        configService={configService}
-        historyService={historyService}
-        peerService={peerService}
-        onExitRoom={handleExitRoom}
-        onQuit={handleQuit}
-      />
-    );
-  }
+  // Create ChatService when we have all dependencies
+  useEffect(() => {
+    if (peerService && state.config && state.currentRoomId) {
+      const cs = new ChatService(peerService, eventBus, {
+        userId,
+        nickname: state.config.nickname || 'User001',
+        roomId: state.currentRoomId,
+      });
+      setChatService(cs);
+    }
+  }, [peerService, state.config, state.currentRoomId, userId, eventBus]);
+
+  // Wire up P2P server to handle incoming messages
+  useEffect(() => {
+    const handleMessage = (p2pMessage: P2PMessage) => {
+      // Only handle 'chat' type messages
+      if (p2pMessage.type !== 'chat') {
+        return;
+      }
+
+      // Ignore messages from ourselves (they were already published by ChatService)
+      if (p2pMessage.senderId === userId) {
+        return;
+      }
+
+      // Type guard: ensure payload is ChatPayload
+      const payload = p2pMessage.payload as ChatPayload;
+      if (!payload.messageId || !payload.content) {
+        return;
+      }
+
+      // Convert P2PMessage to ChatMessage for local display
+      const chatMessage: ChatMessage = {
+        id: payload.messageId,
+        type: 'normal',
+        roomId: p2pMessage.roomId,
+        senderId: p2pMessage.senderId,
+        senderNickname: p2pMessage.senderNickname,
+        content: payload.content,
+        timestamp: p2pMessage.timestamp,
+        replyTo: payload.replyTo ? {
+          originalMessageId: payload.replyTo.originalMessageId,
+          originalSenderNickname: payload.replyTo.originalSenderNickname,
+          originalContent: payload.replyTo.originalContent,
+        } : undefined,
+        mentions: payload.mentions,
+      };
+      eventBus.publish('message', chatMessage);
+    };
+
+    // Register the handler and store the unsubscribe function
+    const unsubscribe = p2pServer.onMessage(handleMessage);
+
+    // Cleanup: unregister the handler when effect re-runs or unmounts
+    return () => {
+      unsubscribe();
+    };
+  }, [p2pServer, eventBus, userId]);
+
+  // Handle config completion
+  const handleConfigComplete = (config: Config) => {
+    setState(prev => ({
+      ...prev,
+      screen: 'roomSelect',
+      config,
+      recentRooms: config.recentRooms || []
+    }));
+  };
+
+  // Handle room selection - join the room and load members
+  const handleSelectRoom = async (roomId: string) => {
+    if (roomService && memberService) {
+      try {
+        await roomService.joinRoom(roomId);
+        // Get initial members from the service
+        const members = memberService.getMembers();
+        setState(prev => ({
+          ...prev,
+          screen: 'chat',
+          currentRoomId: roomId,
+          recentRooms: prev.recentRooms.includes(roomId)
+            ? prev.recentRooms
+            : [roomId, ...prev.recentRooms].slice(0, 10),
+          currentMembers: members
+        }));
+      } catch (error) {
+        console.error('Failed to join room:', error);
+        // Still transition to chat screen but with empty members
+        setState(prev => ({
+          ...prev,
+          screen: 'chat',
+          currentRoomId: roomId,
+          recentRooms: prev.recentRooms.includes(roomId)
+            ? prev.recentRooms
+            : [roomId, ...prev.recentRooms].slice(0, 10),
+          currentMembers: []
+        }));
+      }
+    } else {
+      // No roomService available yet, just transition
+      setState(prev => ({
+        ...prev,
+        screen: 'chat',
+        currentRoomId: roomId,
+        recentRooms: prev.recentRooms.includes(roomId)
+          ? prev.recentRooms
+          : [roomId, ...prev.recentRooms].slice(0, 10),
+        currentMembers: []
+      }));
+    }
+  };
+
+  // Handle room creation
+  const handleCreateRoom = (roomId: string) => {
+    handleSelectRoom(roomId);
+  };
+
+  // Handle back navigation
+  const handleBack = () => {
+    // From config screen, there's nowhere to go
+    // But we need this for RoomSelectScreen
+  };
+
+  // Handle exit room
+  const handleExitRoom = () => {
+    setState(prev => ({
+      ...prev,
+      screen: 'roomSelect',
+      currentRoomId: null,
+      currentMembers: []
+    }));
+  };
+
+  // Handle quit application - triggers full cleanup
+  const handleQuitApp = () => {
+    // Call the onQuitApp callback if provided
+    if (onQuitApp) {
+      onQuitApp();
+    } else if (internalQuit) {
+      // If internal quit mode, just exit
+      process.exit(0);
+    }
+  };
+
+  // Render current screen
+  const renderScreen = () => {
+    switch (state.screen) {
+      case 'config':
+        return (
+          <ConfigScreen
+            onConfigComplete={handleConfigComplete}
+            initialConfig={state.config || undefined}
+          />
+        );
+
+      case 'roomSelect':
+        return (
+          <RoomSelectScreen
+            rooms={[]} // Will be populated from ZK in M1.7
+            recentRooms={state.recentRooms}
+            onSelectRoom={handleSelectRoom}
+            onCreateRoom={handleCreateRoom}
+            onBack={handleBack}
+          />
+        );
+
+      case 'chat':
+        return (
+          <ChatScreen
+            roomId={state.currentRoomId || 'unknown'}
+            onExitRoom={handleExitRoom}
+            onQuitApp={handleQuitApp}
+            members={state.currentMembers}
+            connectionStatus={state.connectionStatus}
+            currentUserId={userId}
+            currentUserNickname={state.config?.nickname || 'User001'}
+            chatService={chatService}
+            onlineMembers={state.currentMembers.filter(m => m.status === 'online')}
+          />
+        );
+    }
+  };
 
   return (
-    <Box paddingX={2}>
-      <Text>Loading...</Text>
+    <Box flexDirection="column">
+      {/* Main Content */}
+      <Box flexGrow={1}>
+        {renderScreen()}
+      </Box>
     </Box>
   );
-}
+};
+
+export default App;

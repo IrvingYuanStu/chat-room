@@ -1,78 +1,151 @@
-import { useEffect, useState } from "react";
-import { Box, Text } from "ink";
-import type { Member } from "../../services/types.js";
-import { MemberService } from "../../services/MemberService.js";
-import { eventBus } from "../../services/EventBus.js";
+/**
+ * MemberList Component - Displays chat room members
+ * M2.6.2: Show member list with online status
+ */
 
-interface MemberListProps {
-  roomId: string;
-  memberService: MemberService;
+import React, { useMemo } from 'react';
+import { Box, Text } from 'ink';
+import { Member } from '../../services/types';
+
+export interface MemberListProps {
+  members: Member[];
+  currentUserId: string;
+  onMemberClick?: (userId: string) => void;
 }
 
-export function MemberList({ roomId, memberService }: MemberListProps) {
-  const [members, setMembers] = useState<Member[]>([]);
+/**
+ * Get status indicator symbol
+ */
+export function getStatusIndicator(status: 'online' | 'offline'): string {
+  return status === 'online' ? '●' : '○';
+}
 
-  useEffect(() => {
-    // Load initial members
-    const loadMembers = () => {
-      const roomMembers = memberService.getMembers(roomId);
-      // Sort by joinedAt descending (newest first)
-      const sorted = [...roomMembers].sort((a, b) => b.joinedAt - a.joinedAt);
-      setMembers(sorted);
-    };
+/**
+ * Get color for status
+ */
+export function getStatusColor(status: 'online' | 'offline'): string {
+  return status === 'online' ? 'green' : 'gray';
+}
 
-    loadMembers();
+/**
+ * Check if member is current user
+ */
+export function isCurrentUser(memberId: string, currentUserId: string): boolean {
+  return memberId === currentUserId;
+}
 
-    // Subscribe to member changes
-    const handler = () => {
-      loadMembers();
-    };
+/**
+ * Format member display name with current user label
+ */
+export function formatMemberDisplayName(
+  nickname: string,
+  isCurrentUser: boolean
+): string {
+  return isCurrentUser ? `${nickname} (我)` : nickname;
+}
 
-    eventBus.on("members-changed", handler);
+/**
+ * Format member count header
+ */
+export function formatMemberCount(count: number): string {
+  return `成员列表 (${count})`;
+}
 
-    return () => {
-      eventBus.off("members-changed", handler);
-    };
-  }, [roomId, memberService]);
+/**
+ * MemberItem - Renders a single member entry
+ */
+export interface MemberItemProps {
+  member: Member;
+  isCurrentUser: boolean;
+  onClick?: () => void;
+}
 
-  // Count online members
-  const onlineCount = members.filter((m) => m.status === "online").length;
-  const offlineCount = members.length - onlineCount;
+export const MemberItem: React.FC<MemberItemProps> = ({
+  member,
+  isCurrentUser,
+  onClick,
+}) => {
+  const indicator = getStatusIndicator(member.status);
+  const color = getStatusColor(member.status);
+  const displayName = formatMemberDisplayName(member.nickname, isCurrentUser);
 
-  console.log(`[MemberList] Room: ${roomId}, Total: ${members.length}, Online: ${onlineCount}, Offline: ${offlineCount}`);
-  console.log(`[MemberList] Members:`, members.map(m => `${m.nickname}(${m.status})`).join(", "));
+  return (
+    <Box>
+      <Text color={color}>{indicator}</Text>
+      <Text
+        color={isCurrentUser ? 'blue' : 'white'}
+        bold={isCurrentUser}
+      >
+        {` ${displayName}`}
+      </Text>
+    </Box>
+  );
+};
+
+/**
+ * MemberList - Displays all members in the chat room
+ */
+export const MemberList: React.FC<MemberListProps> = ({
+  members,
+  currentUserId,
+  onMemberClick,
+}) => {
+  // Sort members by joinedAt descending (newest first)
+  const sortedMembers = useMemo(
+    () => [...members].sort((a, b) => b.joinedAt - a.joinedAt),
+    [members]
+  );
+
+  const onlineCount = useMemo(
+    () => members.filter((m) => m.status === 'online').length,
+    [members]
+  );
 
   return (
     <Box
-      flexGrow={1}
       flexDirection="column"
+      width={30}
       borderStyle="single"
-      borderColor="gray"
+      borderColor="cyan"
       paddingX={1}
     >
-      <Box borderBottom={true} borderColor="gray" marginBottom={1} paddingBottom={1}>
-        <Text bold>成员 ({members.length})</Text>
-        <Text dimColor> - </Text>
-        <Text color="green">{onlineCount}</Text>
-        <Text dimColor>/</Text>
-        <Text color="white">{members.length}</Text>
+      {/* Header */}
+      <Box marginBottom={1}>
+        <Text bold>成员列表 ({members.length})</Text>
       </Box>
 
-      <Box flexDirection="column" overflow="hidden">
-        {members.length === 0 ? (
-          <Text dimColor>暂无成员</Text>
+      {/* Online status summary */}
+      <Box marginBottom={1}>
+        <Text dimColor>
+          在线: {onlineCount} / 离线: {members.length - onlineCount}
+        </Text>
+      </Box>
+
+      {/* Divider */}
+      <Box marginBottom={1}>
+        <Text dimColor>{'─'.repeat(25)}</Text>
+      </Box>
+
+      {/* Member list */}
+      <Box flexDirection="column" overflow="visible">
+        {sortedMembers.length === 0 ? (
+          <Box>
+            <Text dimColor>No members yet</Text>
+          </Box>
         ) : (
-          members.map((member) => (
-            <Box key={member.userId} marginBottom={1}>
-              <Text
-                color={member.status === "online" ? "green" : "gray"}
-              >
-                {member.status === "online" ? "●" : "○"} {member.nickname}
-              </Text>
+          sortedMembers.map((member) => (
+            <Box key={member.userId}>
+              <MemberItem
+                member={member}
+                isCurrentUser={isCurrentUser(member.userId, currentUserId)}
+                onClick={() => onMemberClick?.(member.userId)}
+              />
             </Box>
           ))
         )}
       </Box>
     </Box>
   );
-}
+};
+
+export default MemberList;

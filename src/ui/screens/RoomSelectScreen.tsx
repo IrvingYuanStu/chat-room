@@ -1,232 +1,243 @@
-import { useState, useEffect } from "react";
-import { Box, Text, Spacer } from "ink";
-import { useInput } from "ink";
-import TextInput from "ink-text-input";
-import Spinner from "ink-spinner";
-import type { RoomInfo } from "../../services/types.js";
-import { RoomService } from "../../services/RoomService.js";
+/**
+ * RoomSelectScreen Component - Room selection interface
+ * M1.8.2: Display room list, support create/join room
+ */
 
-interface RoomSelectScreenProps {
-  roomService: RoomService;
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Box, Text, useInput } from 'ink';
+import TextInput from 'ink-text-input';
+
+export interface RoomSelectScreenProps {
+  rooms: string[];
   recentRooms: string[];
-  onRoomJoined: (roomId: string) => void;
+  onSelectRoom: (roomId: string) => void;
+  onCreateRoom: (roomId: string) => void;
+  onBack: () => void;
 }
 
-export function RoomSelectScreen({ roomService, recentRooms, onRoomJoined }: RoomSelectScreenProps) {
-  const [loading, setLoading] = useState(true);
-  const [rooms, setRooms] = useState<RoomInfo[]>([]);
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const [customRoomId, setCustomRoomId] = useState("");
-  const [joining, setJoining] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [isCustomMode, setIsCustomMode] = useState(false);
+/**
+ * Validate room ID format (alphanumeric, underscore, hyphen)
+ */
+function isValidRoomId(roomId: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(roomId);
+}
 
+/**
+ * RoomSelectScreen - Room selection interface
+ */
+export const RoomSelectScreen: React.FC<RoomSelectScreenProps> = ({
+  rooms,
+  recentRooms,
+  onSelectRoom,
+  onCreateRoom,
+  onBack
+}) => {
+  const [selectedIndex, setSelectedIndex] = useState<number>(0);
+  const [isCreating, setIsCreating] = useState<boolean>(false);
+  const [newRoomId, setNewRoomId] = useState<string>('');
+  const [error, setError] = useState<string>('');
+
+  // Memoize displayRooms and otherRooms to prevent recalculation on every render
+  const { displayRooms, otherRooms } = useMemo(() => {
+    const allRooms = [...new Set([...recentRooms, ...rooms])];
+    const other = allRooms.filter(room => !recentRooms.includes(room));
+    return {
+      displayRooms: [...recentRooms, ...other],
+      otherRooms: other
+    };
+  }, [recentRooms, rooms]);
+
+  // Reset selection when displayRooms length changes (not when selectedIndex changes)
   useEffect(() => {
-    loadRooms();
+    if (selectedIndex >= displayRooms.length && displayRooms.length > 0) {
+      setSelectedIndex(displayRooms.length - 1);
+    }
+  }, [displayRooms.length]);
+
+  // Memoize callbacks to prevent useInput re-registration
+  const handleSelectRoom = useCallback((roomId: string) => {
+    onSelectRoom(roomId);
+  }, [onSelectRoom]);
+
+  const handleCreateNewRoom = useCallback(() => {
+    setIsCreating(true);
+    setNewRoomId('');
   }, []);
 
-  const loadRooms = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const roomList = await roomService.listAvailableRooms();
-      setRooms(roomList);
+  const handleCancelCreate = useCallback(() => {
+    setIsCreating(false);
+    setNewRoomId('');
+    setError('');
+  }, []);
 
-      // If there are recent rooms, prioritize the first one
-      if (recentRooms.length > 0) {
-        const recentIndex = roomList.findIndex((r) => r.roomId === recentRooms[0]);
-        if (recentIndex !== -1) {
-          setSelectedIndex(recentIndex);
-        }
-      }
-    } catch (err) {
-      setError(`加载聊天室列表失败: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleJoin = async (roomId: string) => {
-    try {
-      setJoining(true);
-      setError(null);
-
-      const exists = rooms.some((r) => r.roomId === roomId);
-
-      if (exists) {
-        await roomService.joinRoom(roomId);
-      } else {
-        // Create and join new room
-        await roomService.createAndJoin(roomId);
-      }
-
-      onRoomJoined(roomId);
-    } catch (err) {
-      setError(`加入聊天室失败: ${err instanceof Error ? err.message : String(err)}`);
-      setJoining(false);
-    }
-  };
-
-  const handleCustomSubmit = async (value: string) => {
-    if (!value.trim()) {
-      setIsCustomMode(false);
-      return;
-    }
-
-    await handleJoin(value.trim());
-  };
-
-  const handleNavigationSubmit = () => {
-    if (rooms.length > 0 && selectedIndex >= 0 && selectedIndex < rooms.length) {
-      handleJoin(rooms[selectedIndex].roomId);
-    }
-  };
-
-  const handleKeyDown = (data: unknown) => {
-    // Keyboard navigation is handled through useInput
-  };
-
-  const toggleCustomMode = () => {
-    setIsCustomMode(!isCustomMode);
-    setCustomRoomId("");
-  };
-
-  // Handle keyboard input for navigation
+  // Handle keyboard navigation with useInput hook
   useInput((input, key) => {
-    if (isCustomMode) {
+    if (isCreating) {
+      // When creating, only handle escape to cancel
       if (key.escape) {
-        setIsCustomMode(false);
-        setCustomRoomId("");
+        handleCancelCreate();
       }
       return;
     }
 
-    if (loading || joining) return;
-
-    // Handle arrow keys for navigation
     if (key.upArrow) {
-      setSelectedIndex((prev) => (prev > 0 ? prev - 1 : rooms.length - 1));
+      setSelectedIndex(prev => Math.max(0, prev - 1));
     } else if (key.downArrow) {
-      setSelectedIndex((prev) => (prev < rooms.length - 1 ? prev + 1 : 0));
-    }
-    // Handle Enter to join selected room
-    else if (key.return && rooms.length > 0) {
-      handleNavigationSubmit();
-    }
-    // Handle 'c' key to create custom room
-    else if (input.toLowerCase() === "c") {
-      toggleCustomMode();
+      setSelectedIndex(prev => Math.min(displayRooms.length, prev + 1));
+    } else if (key.return) {
+      if (selectedIndex < displayRooms.length) {
+        handleSelectRoom(displayRooms[selectedIndex]);
+      } else {
+        // Last item is "Create new room"
+        handleCreateNewRoom();
+      }
+    } else if (key.escape) {
+      onBack();
     }
   });
 
-  if (loading) {
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <Box marginBottom={1}>
-          <Text>
-            <Spinner type="dots" /> 正在加载聊天室列表...
-          </Text>
-        </Box>
-      </Box>
-    );
-  }
+  // Handle creating a new room
+  const handleCreateRoom = () => {
+    const trimmedId = newRoomId.trim();
 
-  if (joining) {
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <Box marginBottom={1}>
-          <Text>
-            <Spinner type="dots" /> 正在加入聊天室...
-          </Text>
-        </Box>
-      </Box>
-    );
-  }
+    if (!trimmedId) {
+      setError('Room ID cannot be empty');
+      return;
+    }
 
-  if (isCustomMode) {
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <Box marginBottom={1}>
-          <Text bold>创建/加入新聊天室</Text>
-        </Box>
+    if (!isValidRoomId(trimmedId)) {
+      setError('Room ID can only contain letters, numbers, underscore, and hyphen');
+      return;
+    }
 
-        <Box marginBottom={1}>
-          <Text>请输入聊天室 ID（不存在则自动创建）:</Text>
-        </Box>
+    // Check if room already exists
+    if (rooms.includes(trimmedId)) {
+      setError('Room already exists. Select it from the list.');
+      return;
+    }
 
-        <Box marginBottom={1}>
-          <Text color="blue">{'>'} 聊天室 ID: </Text>
-          <TextInput
-            value={customRoomId}
-            onChange={setCustomRoomId}
-            onSubmit={handleCustomSubmit}
-            placeholder="general"
-          />
-        </Box>
-
-        <Box>
-          <Text dimColor>按 Esc 返回列表</Text>
-        </Box>
-
-        <Box marginTop={1}>
-          {error && <Text color="red">✗ {error}</Text>}
-        </Box>
-      </Box>
-    );
-  }
+    setError('');
+    onCreateRoom(trimmedId);
+  };
 
   return (
-    <Box flexDirection="column" paddingX={2}>
-      <Box marginBottom={1}>
-        <Text bold>选择聊天室</Text>
-        <Spacer />
-        <Text dimColor>上下键选择，Enter 加入，C 创建新聊天室</Text>
+    <Box flexDirection="column" padding={1}>
+      {/* Title */}
+      <Box>
+        <Text bold>Select Chat Room</Text>
       </Box>
 
-      {rooms.length === 0 ? (
-        <Box flexDirection="column" marginBottom={1}>
-          <Box marginBottom={1}>
-            <Text dimColor>暂无可用聊天室</Text>
-          </Box>
+      <Box marginY={1}>
+        <Text dimColor>{"=".repeat(40)}</Text>
+      </Box>
 
-          <Box>
-            <Text color="yellow">按 C 创建新聊天室</Text>
-          </Box>
-        </Box>
-      ) : (
-        <>
+      {/* Room List */}
+      {!isCreating && (
+        <Box flexDirection="column">
+          {/* Recent Rooms Section */}
           {recentRooms.length > 0 && (
-            <Box marginBottom={1}>
-              <Text color="gray" dimColor>
-                最近访问: {recentRooms.join(", ")}
-              </Text>
-            </Box>
+            <>
+              <Box marginBottom={1}>
+                <Text dimColor>Recent:</Text>
+              </Box>
+              {recentRooms.map((room, index) => {
+                const actualIndex = index;
+                const isSelected = selectedIndex === actualIndex;
+                return (
+                  <Box key={room} marginLeft={2}>
+                    <Text
+                      color={isSelected ? 'cyan' : undefined}
+                      bold={isSelected}
+                    >
+                      {isSelected ? '> ' : '  '}
+                      {room}
+                    </Text>
+                  </Box>
+                );
+              })}
+            </>
           )}
 
-          <Box flexDirection="column" marginBottom={1}>
-            {rooms.map((room, index) => (
-              <Box key={room.roomId}>
-                <Text
-                  color={index === selectedIndex ? "blue" : "white"}
-                  bold={index === selectedIndex}
-                >
-                  {index === selectedIndex ? "> " : "  "}
-                  {index + 1}. {room.roomId} ({room.memberCount} 位成员)
-                  {recentRooms.includes(room.roomId) && (
-                    <Text color="yellow"> [最近]</Text>
-                  )}
-                </Text>
+          {/* All Rooms Section */}
+          {otherRooms.length > 0 && (
+            <>
+              <Box marginTop={1} marginBottom={1}>
+                <Text dimColor>All Rooms:</Text>
               </Box>
-            ))}
+              {otherRooms.map((room) => {
+                const actualIndex = recentRooms.length + otherRooms.indexOf(room);
+                const isSelected = selectedIndex === actualIndex;
+                return (
+                  <Box key={room} marginLeft={2}>
+                    <Text
+                      color={isSelected ? 'cyan' : undefined}
+                      bold={isSelected}
+                    >
+                      {isSelected ? '> ' : '  '}
+                      {room}
+                    </Text>
+                  </Box>
+                );
+              })}
+            </>
+          )}
+
+          {/* Create New Room Option */}
+          <Box marginTop={1}>
+            <Text
+              color={selectedIndex === displayRooms.length ? 'cyan' : undefined}
+              bold={selectedIndex === displayRooms.length}
+            >
+              {selectedIndex === displayRooms.length ? '> ' : '  '}
+              + Create new room
+            </Text>
           </Box>
-        </>
+
+          {/* Navigation Help */}
+          <Box marginTop={2}>
+            <Text dimColor>↑↓ Navigate | Enter Select | Esc Back</Text>
+          </Box>
+        </Box>
       )}
 
+      {/* Create New Room Form */}
+      {isCreating && (
+        <Box flexDirection="column">
+          <Box marginBottom={1}>
+            <Text>Enter new room ID:</Text>
+          </Box>
+          <Box>
+            <Text dimColor>Room ID: </Text>
+            <TextInput
+              value={newRoomId}
+              onChange={(value: string) => {
+                setNewRoomId(value);
+                setError('');
+              }}
+              onSubmit={handleCreateRoom}
+              placeholder="my-room"
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text dimColor>Letters, numbers, underscore, hyphen only</Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text dimColor>Enter Confirm | Esc Cancel</Text>
+          </Box>
+        </Box>
+      )}
+
+      {/* Error Display */}
       {error && (
         <Box marginTop={1}>
-          <Text color="red">✗ {error}</Text>
+          <Text color="red">{error}</Text>
         </Box>
       )}
     </Box>
   );
-}
+};
+
+// Helper export for testing
+export { isValidRoomId };
+
+export default RoomSelectScreen;

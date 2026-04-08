@@ -1,76 +1,111 @@
-import net from "node:net";
-import type { PeerAddress, UserId } from "../services/types.js";
-import { PeerConnection } from "./PeerConnection.js";
+/**
+ * P2P Client
+ * Client for connecting to peers and sending/receiving messages
+ */
+
+import * as net from 'net';
+import { P2PTransport } from './P2PTransport';
+import { P2PMessage } from '../services/types';
 
 export class P2PClient {
-  private localUserId: UserId;
-  private localNickname: string;
-  private localRoomId: string;
-  private localAddress: PeerAddress;
+  private transport: P2PTransport;
+  private connections: net.Socket[] = [];
+  private connected: boolean = false;
 
-  constructor(
-    localUserId: UserId,
-    localNickname: string,
-    localRoomId: string,
-    localAddress: PeerAddress,
-  ) {
-    this.localUserId = localUserId;
-    this.localNickname = localNickname;
-    this.localRoomId = localRoomId;
-    this.localAddress = localAddress;
+  constructor(transport: P2PTransport) {
+    this.transport = transport;
   }
 
-  async connect(address: PeerAddress): Promise<PeerConnection> {
+  /**
+   * Connect to a peer at the specified address
+   * @param ip IP address of the peer
+   * @param port Port number of the peer
+   */
+  async connect(ip: string, port: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      const socket = new net.Socket();
-
-      const timeout = setTimeout(() => {
-        socket.destroy();
-        reject(new Error(`Connection timeout to ${address.ip}:${address.port}`));
-      }, 10_000);
-
-      socket.connect(address.port, address.ip, () => {
-        clearTimeout(timeout);
-
-        const connection = new PeerConnection(
-          socket,
-          this.localUserId,
-          this.localNickname,
-          this.localRoomId,
-          this.localAddress,
-        );
-
-        resolve(connection);
+      const socket = net.createConnection({ host: ip, port }, () => {
+        this.connections.push(socket);
+        this.connected = true;
+        resolve();
       });
 
-      socket.once("error", (err: Error) => {
-        clearTimeout(timeout);
-        socket.destroy();
+      socket.on('error', (err) => {
         reject(err);
+      });
+
+      socket.on('close', () => {
+        const index = this.connections.indexOf(socket);
+        if (index !== -1) {
+          this.connections.splice(index, 1);
+        }
+        this.connected = this.connections.length > 0;
       });
     });
   }
 
-  async connectWithRetry(
-    address: PeerAddress,
-    maxRetries: number = 3,
-    baseInterval: number = 1000,
-  ): Promise<PeerConnection> {
-    let lastError: Error | null = null;
+  /**
+   * Disconnect from all connected peers
+   */
+  disconnect(): void {
+    this.connections.forEach((socket) => {
+      socket.destroy();
+    });
+    this.connections = [];
+    this.connected = false;
+  }
 
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        return await this.connect(address);
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        if (attempt < maxRetries - 1) {
-          // Exponential backoff: 1s, 2s, 4s
-          const delay = baseInterval * Math.pow(2, attempt);
-          await new Promise((r) => setTimeout(r, delay));
-        }
-      }
+  /**
+   * Send a message to a specific peer
+   * @param message The P2P message to send
+   */
+  async send(message: P2PMessage): Promise<void> {
+    if (this.connections.length === 0) {
+      throw new Error('No active connections');
     }
 
-    throw lastError || new Error(`Failed to connect to ${address.ip}:${address.port} after ${maxRetries} retries`);
+    const encoded = this.transport.encode(message);
+
+    return new Promise((resolve, reject) => {
+      const socket = this.connections[0];
+      const success = socket.write(encoded, (err) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+
+      if (!success) {
+        reject(new Error('Write failed'));
+      }
+    });
+  }
+
+  /**
+   * Broadcast a message to all connected peers
+   * @param message The P2P message to broadcast
+   */
+  broadcast(message: P2PMessage): void {
+    const encoded = this.transport.encode(message);
+
+    this.connections.forEach((socket) => {
+      socket.write(encoded);
+    });
+  }
+
+  /**
+   * Get the number of active connections
+   * @returns Number of connected peers
+   */
+  getConnectionCount(): number {
+    return this.connections.length;
+  }
+
+  /**
+   * Check if the client is connected to any peers
+   * @returns true if connected, false otherwise
+   */
+  isConnected(): boolean {
+    return this.connected;
   }
 }

@@ -1,292 +1,226 @@
-import type { P2PProtocolMessage, UserId, PeerAddress, Member, HandshakeResponsePayload } from "./types.js";
-import { P2PServer } from "../network/P2PServer.js";
-import { P2PClient } from "../network/P2PClient.js";
-import { PeerConnection } from "../network/PeerConnection.js";
-import { MemberService } from "./MemberService.js";
-import { eventBus } from "./EventBus.js";
+/**
+ * Peer Service
+ * Manages all P2P connections and message broadcasting
+ */
+
+import { P2PClient } from '../network/P2PClient';
+import { P2PTransport } from '../network/P2PTransport';
+import { P2PMessage } from './types';
+
+export interface PeerInfo {
+  ip: string;
+  port: number;
+  client: P2PClient;
+}
+
+export type PeerConnectedCallback = (peer: PeerInfo) => void;
+export type PeerDisconnectedCallback = (peer: PeerInfo) => void;
+export type MessageCallback = (message: P2PMessage) => void;
 
 export class PeerService {
-  // Map<roomId, Map<userId, PeerConnection>>
-  private connections: Map<string, Map<UserId, PeerConnection>> = new Map();
-  private server: P2PServer | null = null;
-  private client: P2PClient | null = null;
-  private messageCallback: ((roomId: string, msg: P2PProtocolMessage) => void) | null = null;
+  private transport: P2PTransport;
+  private serverIp: string;
+  private serverPort: number;
+  private clients: Map<string, P2PClient> = new Map(); // key: "ip:port"
+  private peerConnectedCallbacks: PeerConnectedCallback[] = [];
+  private peerDisconnectedCallbacks: PeerDisconnectedCallback[] = [];
+  private messageCallbacks: MessageCallback[] = [];
 
-  // Local peer info
-  private localUserId: UserId | null = null;
-  private localNickname: string | null = null;
-  private localRoomId: string | null = null;
-  private localAddress: PeerAddress | null = null;
-
-  constructor(
-    private memberService: MemberService,
-  ) {}
-
-  /**
-   * Set message callback
-   */
-  onMessage(callback: (roomId: string, msg: P2PProtocolMessage) => void): void {
-    this.messageCallback = callback;
+  constructor(transport: P2PTransport, serverIp: string, serverPort: number) {
+    this.transport = transport;
+    this.serverIp = serverIp;
+    this.serverPort = serverPort;
   }
 
   /**
-   * Start P2P server
+   * Generate a unique key for a peer
    */
-  async startServer(port: number): Promise<number> {
-    if (!this.localUserId || !this.localNickname || !this.localRoomId || !this.localAddress) {
-      throw new Error("Local peer info not set. Call setLocalInfo first.");
-    }
-
-    this.server = new P2PServer(
-      this.localUserId,
-      this.localNickname,
-      this.localRoomId,
-      this.localAddress
-    );
-    const actualPort = await this.server.start(port);
-
-    this.server.onConnection((connection) => {
-      this.handleIncomingConnection(connection, this.localRoomId!);
-    });
-
-    return actualPort;
-  }
-
-  /**
-   * Set local peer info
-   */
-  setLocalInfo(userId: UserId, nickname: string, roomId: string, address: PeerAddress): void {
-    this.localUserId = userId;
-    this.localNickname = nickname;
-    this.localRoomId = roomId;
-    this.localAddress = address;
-  }
-
-  /**
-   * Initialize P2P client
-   */
-  initClient(userId: UserId, nickname: string, roomId: string, address: PeerAddress): void {
-    this.client = new P2PClient(userId, nickname, roomId, address);
+  private getPeerKey(ip: string, port: number): string {
+    return `${ip}:${port}`;
   }
 
   /**
    * Connect to a peer
+   * @param ip IP address of the peer
+   * @param port Port number of the peer
    */
-  async connectToPeer(roomId: string, member: Member): Promise<void> {
-    if (!this.client) {
-      throw new Error("P2P client not initialized");
-    }
+  async connectToPeer(ip: string, port: number): Promise<void> {
+    const key = this.getPeerKey(ip, port);
+    const client = new P2PClient(this.transport);
 
-    // Check if already connected
-    if (this.isConnected(roomId, member.userId)) {
+    await client.connect(ip, port);
+    this.clients.set(key, client);
+
+    // Notify listeners
+    this.peerConnectedCallbacks.forEach((cb) => cb({ ip, port, client }));
+  }
+
+  /**
+   * Disconnect from a specific peer
+   * @param ip IP address of the peer
+   * @param port Port number of the peer
+   */
+  disconnectFromPeer(ip: string, port: number): void {
+    const key = this.getPeerKey(ip, port);
+    const client = this.clients.get(key);
+
+    if (client) {
+      client.disconnect();
+      this.clients.delete(key);
+
+      // Notify listeners
+      this.peerDisconnectedCallbacks.forEach((cb) => cb({ ip, port, client }));
+    }
+  }
+
+  /**
+   * Disconnect from all peers
+   */
+  disconnectAll(): void {
+    this.clients.forEach((client) => {
+      client.disconnect();
+    });
+    this.clients.clear();
+  }
+
+  /**
+   * Broadcast a message to all connected peers
+   * @param message The message to broadcast
+   */
+  broadcast(message: P2PMessage): void {
+    if (this.clients.size === 0) {
       return;
     }
 
-    try {
-      const connection = await this.client.connect(member.address);
+    this.clients.forEach((client) => {
+      try {
+        client.broadcast(message);
+      } catch (error) {
+        // Log error but continue broadcasting to other peers
+        console.error(`Failed to broadcast to peer: ${error}`);
+      }
+    });
+  }
 
-      // Set up connection handlers
-      this.setupConnectionHandlers(connection, roomId);
+  /**
+   * Send a message to a specific peer
+   * @param ip IP address of the peer
+   * @param port Port number of the peer
+   * @param message The message to send
+   */
+  sendToPeer(ip: string, port: number, message: P2PMessage): void {
+    const key = this.getPeerKey(ip, port);
+    const client = this.clients.get(key);
 
-      // Set up message handler for this connection
-      connection.onMessage((msg: P2PProtocolMessage) => {
-        if (msg.type === "handshake") {
-          const payload = msg.payload as HandshakeResponsePayload;
+    if (!client) {
+      throw new Error(`Peer ${ip}:${port} not found`);
+    }
 
-          // Verify it's a handshake response (has members field)
-          if ("members" in payload) {
-            connection.processHandshakeResponse(msg);
-            this.addConnection(roomId, member.userId, connection);
+    client.send(message);
+  }
 
-            // Emit peer connected event
-            eventBus.emit("peer-connected", roomId, member);
-          }
-        } else {
-          // Forward other messages to chat service
-          this.messageCallback?.(roomId, msg);
-        }
+  /**
+   * Get list of all connected peers
+   * @returns Array of peer info
+   */
+  getPeers(): PeerInfo[] {
+    const peers: PeerInfo[] = [];
+
+    this.clients.forEach((client, key) => {
+      const [ip, portStr] = key.split(':');
+      const port = parseInt(portStr, 10);
+
+      peers.push({
+        ip,
+        port,
+        client,
       });
-
-      // Initiate handshake
-      connection.initiateHandshake();
-    } catch (err) {
-      console.warn(`Failed to connect to peer ${member.nickname} at ${member.address.ip}:${member.address.port}:`, err);
-      throw err;
-    }
-  }
-
-  /**
-   * Handle incoming connection
-   */
-  private handleIncomingConnection(connection: PeerConnection, roomId: string): void {
-    this.setupConnectionHandlers(connection, roomId);
-
-    connection.onMessage((msg: P2PProtocolMessage) => {
-      if (msg.type === "handshake") {
-        const payload = msg.payload as HandshakeResponsePayload;
-
-        // Check if this is a handshake request (no members field = request)
-        if (!("members" in payload)) {
-          // Handshake already handled by PeerConnection, just add to connections
-          const remoteUserId = connection.getRemoteUserId();
-          if (remoteUserId) {
-            this.addConnection(roomId, remoteUserId, connection);
-
-            // Create member object for event
-            const remoteInfo = connection.getRemoteInfo();
-            if (remoteInfo) {
-              const member: Member = {
-                userId: remoteInfo.userId,
-                nickname: remoteInfo.nickname,
-                status: "online",
-                address: remoteInfo.address,
-                joinedAt: Date.now(),
-              };
-
-              // Emit peer connected event
-              eventBus.emit("peer-connected", roomId, member);
-            }
-          }
-        }
-      } else {
-        // Forward other messages to chat service
-        this.messageCallback?.(roomId, msg);
-      }
-    });
-  }
-
-  /**
-   * Set up connection message and timeout handlers
-   */
-  private setupConnectionHandlers(connection: PeerConnection, roomId: string): void {
-    connection.onTimeout(() => {
-      const remoteUserId = connection.getRemoteUserId();
-      if (remoteUserId) {
-        console.warn(`Peer ${remoteUserId} in room ${roomId} timeout`);
-        this.disconnectPeer(roomId, remoteUserId);
-        this.memberService.markOffline(roomId, remoteUserId);
-      }
     });
 
-    connection.onClose(() => {
-      const remoteUserId = connection.getRemoteUserId();
-      if (remoteUserId) {
-        this.removeConnection(roomId, remoteUserId);
-        eventBus.emit("peer-disconnected", roomId, remoteUserId);
-      }
-    });
+    return peers;
   }
 
   /**
-   * Disconnect a specific peer
+   * Get the number of connected peers
+   * @returns Number of peers
    */
-  disconnectPeer(roomId: string, userId: string): void {
-    const roomConnections = this.connections.get(roomId);
-    if (!roomConnections) return;
-
-    const connection = roomConnections.get(userId);
-    if (connection) {
-      connection.close();
-      roomConnections.delete(userId);
-    }
+  getPeerCount(): number {
+    return this.clients.size;
   }
 
   /**
-   * Disconnect all peers in a room
+   * Check if connected to any peers
+   * @returns true if connected to at least one peer
    */
-  disconnectAll(roomId: string): void {
-    const roomConnections = this.connections.get(roomId);
-    if (!roomConnections) return;
-
-    for (const [userId, connection] of roomConnections) {
-      connection.close();
-    }
-
-    this.connections.delete(roomId);
+  isConnected(): boolean {
+    return this.clients.size > 0;
   }
 
   /**
-   * Broadcast message to all peers in a room
+   * Get the server address
+   * @returns Server address in "ip:port" format
    */
-  broadcast(roomId: string, message: P2PProtocolMessage): void {
-    const roomConnections = this.connections.get(roomId);
-    if (!roomConnections) return;
-
-    const disconnected: UserId[] = [];
-
-    for (const [userId, connection] of roomConnections) {
-      if (connection.isAlive()) {
-        connection.send(message);
-      } else {
-        disconnected.push(userId);
-      }
-    }
-
-    // Clean up disconnected peers
-    for (const userId of disconnected) {
-      this.disconnectPeer(roomId, userId);
-    }
+  getServerAddress(): string {
+    return `${this.serverIp}:${this.serverPort}`;
   }
 
   /**
-   * Get all connections for a room
+   * Register callback for peer connection events
+   * @param callback Callback function
+   * @returns Unsubscribe function
    */
-  getConnections(roomId: string): Map<UserId, PeerConnection> {
-    if (!this.connections.has(roomId)) {
-      this.connections.set(roomId, new Map());
-    }
-    return this.connections.get(roomId)!;
+  onPeerConnected(callback: PeerConnectedCallback): void {
+    this.peerConnectedCallbacks.push(callback);
   }
 
   /**
-   * Check if connected to a specific peer
+   * Register callback for peer disconnection events
+   * @param callback Callback function
+   * @returns Unsubscribe function
    */
-  isConnected(roomId: string, userId: string): boolean {
-    const roomConnections = this.connections.get(roomId);
-    return roomConnections?.has(userId) ?? false;
+  onPeerDisconnected(callback: PeerDisconnectedCallback): void {
+    this.peerDisconnectedCallbacks.push(callback);
   }
 
   /**
-   * Add connection to map
+   * Register callback for received messages
+   * @param callback Callback function
+   * @returns Unsubscribe function
    */
-  private addConnection(roomId: string, userId: string, connection: PeerConnection): void {
-    if (!this.connections.has(roomId)) {
-      this.connections.set(roomId, new Map());
-    }
-    this.connections.get(roomId)!.set(userId, connection);
+  onMessage(callback: MessageCallback): void {
+    this.messageCallbacks.push(callback);
   }
 
   /**
-   * Remove connection from map
+   * Remove a peer connected callback
+   * @param callback Callback function to remove
    */
-  private removeConnection(roomId: string, userId: string): void {
-    const roomConnections = this.connections.get(roomId);
-    if (!roomConnections) return;
-
-    roomConnections.delete(userId);
-
-    // Clean up empty room maps
-    if (roomConnections.size === 0) {
-      this.connections.delete(roomId);
+  removePeerConnectedCallback(callback: PeerConnectedCallback): void {
+    const index = this.peerConnectedCallbacks.indexOf(callback);
+    if (index !== -1) {
+      this.peerConnectedCallbacks.splice(index, 1);
     }
   }
 
   /**
-   * Stop server and clean up
+   * Remove a peer disconnected callback
+   * @param callback Callback function to remove
    */
-  stopServer(): void {
-    if (this.server) {
-      this.server.stop();
-      this.server = null;
+  removePeerDisconnectedCallback(callback: PeerDisconnectedCallback): void {
+    const index = this.peerDisconnectedCallbacks.indexOf(callback);
+    if (index !== -1) {
+      this.peerDisconnectedCallbacks.splice(index, 1);
     }
+  }
 
-    // Close all connections
-    for (const [roomId, roomConnections] of this.connections) {
-      for (const [userId, connection] of roomConnections) {
-        connection.close();
-      }
+  /**
+   * Remove a message callback
+   * @param callback Callback function to remove
+   */
+  removeMessageCallback(callback: MessageCallback): void {
+    const index = this.messageCallbacks.indexOf(callback);
+    if (index !== -1) {
+      this.messageCallbacks.splice(index, 1);
     }
-
-    this.connections.clear();
   }
 }

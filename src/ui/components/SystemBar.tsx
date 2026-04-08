@@ -1,76 +1,91 @@
-import { useEffect, useState } from "react";
-import { Box, Text } from "ink";
-import { eventBus } from "../../services/EventBus.js";
+/**
+ * SystemBar Component - Status bar at the bottom of the screen
+ * M1.8.3: Display connection status and message count
+ */
 
-interface SystemBarProps {
-  roomId: string | null;
-  memberCount: number;
+import React from 'react';
+import { Box, Text } from 'ink';
+
+export type ConnectionStatus = 'connected' | 'reconnecting' | 'disconnected';
+
+export interface SystemBarProps {
+  roomId: string;
+  isConnected: boolean;
+  connectionStatus: ConnectionStatus;
+  messageCount: number;
 }
 
-export function SystemBar({ roomId, memberCount }: SystemBarProps) {
-  const [zkStatus, setZkStatus] = useState<"connected" | "disconnected" | "reconnected">("connected");
+/**
+ * Get display text for connection status
+ */
+function getConnectionText(status: ConnectionStatus): string {
+  switch (status) {
+    case 'connected':
+      return 'Connected';
+    case 'reconnecting':
+      return 'Reconnecting...';
+    case 'disconnected':
+      return 'Disconnected';
+  }
+}
 
-  useEffect(() => {
-    const onDisconnected = () => {
-      setZkStatus("disconnected");
-    };
+/**
+ * Get color for connection status
+ */
+function getConnectionColor(status: ConnectionStatus): string {
+  switch (status) {
+    case 'connected':
+      return 'green';
+    case 'reconnecting':
+      return 'yellow';
+    case 'disconnected':
+      return 'red';
+  }
+}
 
-    const onReconnected = () => {
-      setZkStatus("reconnected");
-      // Reset to connected after 3 seconds
-      setTimeout(() => {
-        setZkStatus("connected");
-      }, 3000);
-    };
-
-    eventBus.on("zk-disconnected", onDisconnected);
-    eventBus.on("zk-reconnected", onReconnected);
-
-    return () => {
-      eventBus.off("zk-disconnected", onDisconnected);
-      eventBus.off("zk-reconnected", onReconnected);
-    };
-  }, []);
-
-  const getStatusText = () => {
-    switch (zkStatus) {
-      case "connected":
-        return <Text color="green">● 已连接</Text>;
-      case "disconnected":
-        return <Text color="yellow">● 断开中</Text>;
-      case "reconnected":
-        return <Text color="green">● 已重连</Text>;
-    }
-  };
+/**
+ * SystemBar - Displays connection status and message count
+ */
+export const SystemBar: React.FC<SystemBarProps> = ({
+  roomId,
+  isConnected,
+  connectionStatus,
+  messageCount
+}) => {
+  const statusText = getConnectionText(connectionStatus);
+  const statusColor = getConnectionColor(connectionStatus);
 
   return (
     <Box
-      borderStyle="single"
-      borderColor="gray"
+      flexDirection="row"
+      justifyContent="space-between"
       paddingX={1}
-      paddingY={1}
-      flexDirection="column"
-      width="100%"
+      borderStyle="single"
+      borderColor="cyan"
     >
-      <Box justifyContent="space-between" width="100%">
-        <Box>
-          <Text bold>chat-room</Text>
-          {roomId && (
-            <>
-              <Text> - </Text>
-              <Text color="cyan">{roomId}</Text>
-            </>
-          )}
-        </Box>
-        <Box gap={2}>
-          {roomId && (
-            <Text>
-              在线: <Text color="blue">{memberCount}</Text>
-            </Text>
-          )}
-          {getStatusText()}
-        </Box>
+      {/* Left: Room ID */}
+      <Box>
+        <Text bold>chat-room - [{roomId}]</Text>
+      </Box>
+
+      {/* Center: Connection Status */}
+      <Box>
+        <Text color={statusColor}>
+          {statusText}
+        </Text>
+      </Box>
+
+      {/* Right: Message Count */}
+      <Box>
+        <Text dimColor>
+          {messageCount} {messageCount === 1 ? 'message' : 'messages'}
+        </Text>
       </Box>
     </Box>
   );
-}
+};
+
+// Helper exports for testing
+export { getConnectionText, getConnectionColor };
+
+export default SystemBar;

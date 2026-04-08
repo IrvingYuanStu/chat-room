@@ -1,82 +1,101 @@
-import type { P2PProtocolMessage } from "../services/types.js";
+/**
+ * P2P Transport Layer
+ * Handles message encoding/decoding with Magic + Length + Payload format
+ */
 
-const MAGIC = Buffer.from([0x43, 0x52]); // "CR" for Chat Room
-const HEADER_SIZE = 6; // 2 (magic) + 4 (length)
-const MAX_FRAME_SIZE = 1024 * 1024; // 1MB max frame
+import { P2PMessage } from '../services/types';
+
+// Magic bytes: 0x4348 ('CH')
+const MAGIC_BYTES = 0x4348;
+const HEADER_SIZE = 6; // 2 bytes magic + 4 bytes length
 
 export class P2PTransport {
-  static encode(message: P2PProtocolMessage): Buffer {
-    const payload = Buffer.from(JSON.stringify(message), "utf-8");
-    const frame = Buffer.alloc(HEADER_SIZE + payload.length);
-    MAGIC.copy(frame, 0);
-    frame.writeUInt32BE(payload.length, 2);
-    payload.copy(frame, HEADER_SIZE);
-    return frame;
+  /**
+   * Encode a P2PMessage into a buffer with Magic + Length + Payload format
+   * @param message The P2P message to encode
+   * @returns Buffer containing encoded message
+   */
+  encode(message: P2PMessage): Buffer {
+    const payload = JSON.stringify(message);
+    const payloadBytes = Buffer.byteLength(payload, 'utf-8');
+    const totalSize = HEADER_SIZE + payloadBytes;
+
+    const buffer = Buffer.alloc(totalSize);
+
+    // Write magic bytes (big-endian)
+    buffer.writeUInt16BE(MAGIC_BYTES, 0);
+
+    // Write payload length (big-endian)
+    buffer.writeUInt32BE(payloadBytes, 2);
+
+    // Write payload
+    buffer.write(payload, HEADER_SIZE, payloadBytes, 'utf-8');
+
+    return buffer;
   }
 
-  static createFrameReassembler(): FrameReassembler {
-    return new FrameReassembler();
-  }
-}
-
-export class FrameReassembler {
-  private buffer: Uint8Array = new Uint8Array(0);
-
-  feed(data: Buffer): P2PProtocolMessage[] {
-    const combined = new Uint8Array(this.buffer.length + data.length);
-    combined.set(this.buffer);
-    combined.set(data, this.buffer.length);
-    this.buffer = combined;
-
-    const messages: P2PProtocolMessage[] = [];
-
-    while (this.buffer.length >= HEADER_SIZE) {
-      if (this.buffer[0] !== MAGIC[0] || this.buffer[1] !== MAGIC[1]) {
-        this.buffer = this.skipToNextMagic();
-        continue;
-      }
-
-      const payloadLength = (this.buffer[2] << 24) | (this.buffer[3] << 16) | (this.buffer[4] << 8) | this.buffer[5];
-
-      if (payloadLength > MAX_FRAME_SIZE) {
-        this.buffer = this.buffer.subarray(HEADER_SIZE);
-        continue;
-      }
-
-      const totalFrameSize = HEADER_SIZE + payloadLength;
-
-      if (this.buffer.length < totalFrameSize) {
-        break;
-      }
-
-      const payload = this.buffer.subarray(HEADER_SIZE, totalFrameSize);
-      this.buffer = this.buffer.subarray(totalFrameSize);
-
-      try {
-        const decoder = new TextDecoder();
-        const message = JSON.parse(decoder.decode(payload)) as P2PProtocolMessage;
-        messages.push(message);
-      } catch {
-        continue;
-      }
+  /**
+   * Decode a buffer into a P2PMessage
+   * @param buffer The buffer to decode
+   * @returns Decoded P2PMessage
+   */
+  decode(buffer: Buffer): P2PMessage {
+    // Verify magic bytes
+    const magic = buffer.readUInt16BE(0);
+    if (magic !== MAGIC_BYTES) {
+      throw new Error(`Invalid magic bytes: expected 0x${MAGIC_BYTES.toString(16)}, got 0x${magic.toString(16)}`);
     }
 
-    return messages;
+    // Read payload length
+    const payloadLength = buffer.readUInt32BE(2);
+
+    // Read payload
+    const payloadBuffer = buffer.slice(HEADER_SIZE, HEADER_SIZE + payloadLength);
+    const payloadString = payloadBuffer.toString('utf-8');
+    const message = JSON.parse(payloadString);
+
+    return message as P2PMessage;
   }
 
-  private skipToNextMagic(): Uint8Array {
-    for (let i = 1; i <= this.buffer.length - 2; i++) {
-      if (this.buffer[i] === MAGIC[0] && this.buffer[i + 1] === MAGIC[1]) {
-        return this.buffer.subarray(i);
-      }
+  /**
+   * Validate that an object is a valid P2PMessage
+   * @param obj The object to validate
+   * @returns true if valid P2PMessage, false otherwise
+   */
+  validate(obj: any): obj is P2PMessage {
+    if (obj === null || obj === undefined) {
+      return false;
     }
-    if (this.buffer.length > 0) {
-      return this.buffer.subarray(this.buffer.length - 1);
-    }
-    return new Uint8Array(0);
-  }
 
-  reset(): void {
-    this.buffer = new Uint8Array(0);
+    if (typeof obj !== 'object') {
+      return false;
+    }
+
+    // Check required fields
+    if (typeof obj.type !== 'string') {
+      return false;
+    }
+
+    if (typeof obj.senderId !== 'string') {
+      return false;
+    }
+
+    if (typeof obj.senderNickname !== 'string') {
+      return false;
+    }
+
+    if (typeof obj.roomId !== 'string') {
+      return false;
+    }
+
+    if (typeof obj.timestamp !== 'number') {
+      return false;
+    }
+
+    if (typeof obj.payload !== 'object' || obj.payload === null) {
+      return false;
+    }
+
+    return true;
   }
 }

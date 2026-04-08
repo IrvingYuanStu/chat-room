@@ -1,202 +1,243 @@
-import { useEffect, useState, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
-import { Box, Text } from "ink";
-import type { ChatMessage } from "../../services/types.js";
-import { eventBus } from "../../services/EventBus.js";
-import { MentionService } from "../../services/MentionService.js";
+/**
+ * ChatView Component - Displays chat messages
+ * M2.6.1: Show message list with formatting
+ * M3.2.3: @ mention highlighting (yellow for mentioned messages)
+ */
 
-export interface ChatViewRef {
-  moveSelection: (direction: "up" | "down") => void;
-  confirmSelection: () => void;
-  exitSelectMode: () => void;
-}
+import React, { useMemo } from 'react';
+import { Box, Text } from 'ink';
+import { ChatMessage } from '../../services/types';
 
-interface ChatViewProps {
-  roomId: string;
-  currentUserId: string;
+export interface ChatViewProps {
   messages: ChatMessage[];
-  mentionService: MentionService;
-  onMessageSelect?: (message: ChatMessage) => void;
+  selectedMessageId?: string;
+  currentUserId: string;
+  onReply: (messageId: string) => void;
+  onMention: (userId: string) => void;
+  /** Optional map of userId to nickname for display */
+  userIdToNickname?: Map<string, string>;
 }
 
-export const ChatView = forwardRef<ChatViewRef, ChatViewProps>(({ roomId, currentUserId, messages, mentionService, onMessageSelect }: ChatViewProps, ref) => {
-  const [selectedIndex, setSelectedIndex] = useState<number>(-1);
-  const [isSelectMode, setIsSelectMode] = useState(false);
+export interface MessageItemProps {
+  message: ChatMessage;
+  isSelected: boolean;
+  isOwnMessage: boolean;
+  isMentioned: boolean;
+  onReply: () => void;
+  onHover: () => void;
+  userIdToNickname?: Map<string, string>;
+}
 
-  // Format timestamp to HH:mm:ss
-  const formatTime = (timestamp: number): string => {
-    const date = new Date(timestamp);
-    const hours = String(date.getHours()).padStart(2, "0");
-    const minutes = String(date.getMinutes()).padStart(2, "0");
-    const seconds = String(date.getSeconds()).padStart(2, "0");
-    return `${hours}:${minutes}:${seconds}`;
-  };
+/**
+ * Format timestamp to HH:mm:ss format
+ */
+export function formatTimestamp(timestamp: number): string {
+  const date = new Date(timestamp);
+  const hours = date.getHours().toString().padStart(2, '0');
+  const minutes = date.getMinutes().toString().padStart(2, '0');
+  const seconds = date.getSeconds().toString().padStart(2, '0');
+  return `[${hours}:${minutes}:${seconds}]`;
+}
 
-  // Format message for display
-  const formatMessage = useCallback(
-    (msg: ChatMessage): string => {
-      const time = formatTime(msg.timestamp);
-      const isSelf = msg.senderId === currentUserId;
+/**
+ * Get display mentions (convert userIds to nicknames)
+ */
+export function getDisplayMentions(
+  mentions: string[] | undefined,
+  userIdToNickname?: Map<string, string>
+): string[] {
+  if (!mentions) return [];
+  return mentions.map(userId => {
+    const nickname = userIdToNickname?.get(userId);
+    return nickname ? `@${nickname}` : `@${userId}`;
+  });
+}
 
-      switch (msg.type) {
-        case "text":
-          if (isSelf) {
-            return `[${time}] 我: ${msg.content}`;
-          }
-          return `[${time}] ${msg.senderNickname}: ${msg.content}`;
+/**
+ * Format a message for display
+ */
+export function formatMessage(
+  message: ChatMessage,
+  currentUserNickname: string,
+  userIdToNickname?: Map<string, string>
+): { time: string; text: string } {
+  const time = formatTimestamp(message.timestamp);
+  const displayNickname =
+    message.senderNickname === currentUserNickname ? '我' : message.senderNickname;
 
-        case "system":
-        case "join":
-        case "leave":
-        case "rename":
-          return `[${time}] 系统: ${msg.content}`;
+  let text: string;
 
-        case "reply":
-          const prefix = isSelf ? "我" : msg.senderNickname;
-          const quote = msg.replyTo
-            ? `[回复 ${msg.replyTo.senderNickname}: ${msg.replyTo.content}]`
-            : "";
-          return `[${time}] ${prefix} ${quote}: ${msg.content}`;
+  switch (message.type) {
+    case 'system':
+      text = `${time} 系统: ${message.content}`;
+      break;
 
-        default:
-          return "";
+    case 'reply':
+      if (message.replyTo) {
+        // Format: [HH:mm:ss] 昵称 [回复 原发送者: 原内容]: 回复内容
+        text = `${time} ${displayNickname} [回复 ${message.replyTo.originalSenderNickname}: ${message.replyTo.originalContent}]: ${message.content}`;
+      } else {
+        text = `${time} ${displayNickname}: ${message.content}`;
       }
-    },
-    [currentUserId]
-  );
+      break;
 
-  // Truncate text for reply preview
-  const truncate = (text: string, maxLength: number): string => {
-    if (text.length <= maxLength) return text;
-    return text.substring(0, maxLength - 3) + "...";
-  };
+    case 'mention':
+      const displayMentions = getDisplayMentions(message.mentions, userIdToNickname);
+      const mentionStr = displayMentions.join(' ');
+      text = `${time} ${displayNickname}: ${mentionStr} ${message.content}`.trim();
+      break;
 
-  // Check if message is mentioned
-  const isMentioned = useCallback(
-    (msg: ChatMessage): boolean => {
-      return mentionService.isMentioned(msg, currentUserId);
-    },
-    [mentionService, currentUserId]
-  );
-
-  // Handle keyboard input
-  useEffect(() => {
-    const handleKeyPress = (data: unknown) => {
-      // Keyboard handling is done at parent level
-      // This component just displays selection state
-    };
-
-    // Handle selection from parent
-    if (isSelectMode && messages.length > 0) {
-      if (selectedIndex >= messages.length) {
-        setSelectedIndex(messages.length - 1);
-      }
-    }
-
-    return () => {};
-  }, [isSelectMode, selectedIndex, messages.length]);
-
-  const moveSelection = useCallback((direction: "up" | "down") => {
-    if (!isSelectMode) {
-      setIsSelectMode(true);
-      setSelectedIndex(direction === "up" ? messages.length - 1 : 0);
-      return;
-    }
-
-    if (direction === "up" && selectedIndex > 0) {
-      setSelectedIndex(selectedIndex - 1);
-    } else if (direction === "down" && selectedIndex < messages.length - 1) {
-      setSelectedIndex(selectedIndex + 1);
-    }
-  }, [isSelectMode, selectedIndex, messages.length]);
-
-  const confirmSelection = useCallback(() => {
-    if (isSelectMode && selectedIndex >= 0 && selectedIndex < messages.length) {
-      const selectedMsg = messages[selectedIndex];
-      if (onMessageSelect) {
-        onMessageSelect(selectedMsg);
-      }
-      exitSelectMode();
-    }
-  }, [isSelectMode, selectedIndex, messages, onMessageSelect]);
-
-  const exitSelectMode = useCallback(() => {
-    setIsSelectMode(false);
-    setSelectedIndex(-1);
-  }, []);
-
-  // Expose keyboard handlers to parent via ref
-  useImperativeHandle(ref, () => ({
-    moveSelection,
-    confirmSelection,
-    exitSelectMode,
-  }), [moveSelection, confirmSelection, exitSelectMode]);
-
-  // Flash terminal title on new message
-  useEffect(() => {
-    const handleNewMessage = () => {
-      // Flash terminal title
-      process.stdout.write("\x1b]2;🔔 新消息\x07");
-      setTimeout(() => {
-        process.stdout.write("\x1b]2;chat-room\x07");
-      }, 2000);
-    };
-
-    eventBus.on("new-message", handleNewMessage);
-
-    return () => {
-      eventBus.off("new-message", handleNewMessage);
-    };
-  }, []);
-
-  if (messages.length === 0) {
-    return (
-      <Box flexGrow={1} paddingX={1} justifyContent="center" alignItems="center">
-        <Text dimColor>暂无消息，开始聊天吧！</Text>
-      </Box>
-    );
+    case 'normal':
+    default:
+      text = `${time} ${displayNickname}: ${message.content}`;
   }
+
+  return { time, text };
+}
+
+/**
+ * Check if a message should be highlighted (current user is mentioned)
+ */
+export function shouldHighlight(
+  message: ChatMessage,
+  currentUserId: string
+): boolean {
+  return message.mentions?.includes(currentUserId) || false;
+}
+
+/**
+ * Check if current user sent the message
+ */
+export function isOwnMessage(
+  message: ChatMessage,
+  currentUserId: string
+): boolean {
+  return message.senderId === currentUserId;
+}
+
+/**
+ * Get message text color based on message type and highlight status
+ * M3.2.3: Yellow highlight for @mentions when current user is mentioned
+ */
+export function getMessageColor(
+  message: ChatMessage,
+  currentUserId: string
+): 'white' | 'green' | 'gray' | 'yellow' {
+  // Yellow for mentions when current user is mentioned
+  if (message.type === 'mention' && shouldHighlight(message, currentUserId)) {
+    return 'yellow';
+  }
+
+  // Gray for system messages
+  if (message.type === 'system') {
+    return 'gray';
+  }
+
+  // Green for own messages
+  if (isOwnMessage(message, currentUserId)) {
+    return 'green';
+  }
+
+  return 'white';
+}
+
+/**
+ * MessageItem - Renders a single chat message
+ * M3.2.3: Yellow highlight for @mentions when current user is mentioned
+ */
+export const MessageItem: React.FC<MessageItemProps> = ({
+  message,
+  isSelected,
+  isOwnMessage,
+  isMentioned,
+  onReply,
+  onHover,
+  userIdToNickname,
+}) => {
+  const formatted = useMemo(
+    () => formatMessage(message, '', userIdToNickname),
+    [message, userIdToNickname]
+  );
+
+  // M3.2.3: Yellow for mentions when current user is mentioned
+  // We need to check if the message is a mention type AND if current user is among the mentions
+  const currentUserIsMentioned = message.type === 'mention' && isMentioned;
+  const textColor = currentUserIsMentioned ? 'yellow' : getMessageColor(message, message.senderId);
 
   return (
     <Box
-      flexGrow={1}
       flexDirection="column"
       paddingX={1}
-      overflow="hidden"
+      {...(isSelected ? { borderStyle: 'single' as const, borderColor: 'cyan' } : {})}
     >
-      {messages.map((msg, index) => {
-        const formatted = formatMessage(msg);
-        const mentioned = isMentioned(msg);
-        const selected = isSelectMode && index === selectedIndex;
-
-        return (
-          <Box key={msg.id} marginBottom={index === messages.length - 1 ? 0 : 1}>
-            <Text
-              color={
-                selected
-                  ? "blue"
-                  : mentioned
-                  ? "yellow"
-                  : msg.type === "system" || msg.type === "join" || msg.type === "leave" || msg.type === "rename"
-                  ? "gray"
-                  : msg.senderId === currentUserId
-                  ? "green"
-                  : undefined
-              }
-              bold={selected}
-              inverse={selected}
-            >
-              {formatted}
-            </Text>
-            {selected && (
-              <Text color="blue" dimColor>
-                {" "}[回复 (Enter)]
-              </Text>
-            )}
-          </Box>
-        );
-      })}
+      <Box>
+        <Text
+          color={textColor}
+          bold={isSelected || currentUserIsMentioned}
+          inverse={isSelected}
+        >
+          {formatted.text}
+        </Text>
+      </Box>
+      {currentUserIsMentioned && !isSelected && (
+        <Box>
+          <Text dimColor italic>
+            (mentioned)
+          </Text>
+        </Box>
+      )}
     </Box>
   );
-});
+};
 
-ChatView.displayName = "ChatView";
+/**
+ * ChatView - Displays a list of chat messages
+ * M3.2.3: @ mention highlighting - messages where current user is mentioned show in yellow
+ */
+export const ChatView: React.FC<ChatViewProps> = ({
+  messages,
+  selectedMessageId,
+  currentUserId,
+  onReply,
+  onMention,
+  userIdToNickname,
+}) => {
+  // Sort messages by timestamp ascending (oldest first)
+  const sortedMessages = useMemo(
+    () => [...messages].sort((a, b) => a.timestamp - b.timestamp),
+    [messages]
+  );
+
+  return (
+    <Box flexDirection="column" flexGrow={1} overflow="hidden">
+      <Box flexDirection="column" overflow="visible">
+        {sortedMessages.length === 0 ? (
+          <Box padding={1}>
+            <Text dimColor>No messages yet. Start the conversation!</Text>
+          </Box>
+        ) : (
+          sortedMessages.map((message) => {
+            const ownMessage = isOwnMessage(message, currentUserId);
+            // M3.2.3: Check if current user is mentioned (for yellow highlighting)
+            const isMentioned = shouldHighlight(message, currentUserId);
+
+            return (
+              <MessageItem
+                key={message.id}
+                message={message}
+                isSelected={selectedMessageId === message.id}
+                isOwnMessage={ownMessage}
+                isMentioned={isMentioned}
+                onReply={() => onReply(message.id)}
+                onHover={() => {}}
+                userIdToNickname={userIdToNickname}
+              />
+            );
+          })
+        )}
+      </Box>
+    </Box>
+  );
+};
+
+export default ChatView;

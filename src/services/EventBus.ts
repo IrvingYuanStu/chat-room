@@ -1,41 +1,113 @@
-import { EventEmitter } from "node:events";
-import type { ChatMessage, Member } from "./types.js";
+import { EventType, EventPayload } from './types';
 
-export interface EventBusEvents {
-  "new-message": (msg: ChatMessage) => void;
-  "members-changed": (roomId: string) => void;
-  "zk-disconnected": () => void;
-  "zk-reconnected": () => void;
-  "connection-lost": (roomId: string, userId: string) => void;
-  "peer-connected": (roomId: string, member: Member) => void;
-  "peer-disconnected": (roomId: string, userId: string) => void;
-}
+type EventHandler<T = unknown> = (payload: T) => void;
 
-type EventKey = keyof EventBusEvents;
-type Handler<E extends EventKey> = EventBusEvents[E];
+/**
+ * EventBus - A simple pub/sub event system for the Chat Room application
+ *
+ * Allows components and services to communicate through events without
+ * tight coupling.
+ */
+export class EventBus {
+  private handlers: Map<EventType, Set<EventHandler>>;
 
-class TypedEventEmitter {
-  private emitter = new EventEmitter();
-
-  on<E extends EventKey>(event: E, handler: Handler<E>): void {
-    this.emitter.on(event, handler);
+  constructor() {
+    this.handlers = new Map();
   }
 
-  off<E extends EventKey>(event: E, handler: Handler<E>): void {
-    this.emitter.off(event, handler);
+  /**
+   * Subscribe to an event
+   * @param event - The event type to subscribe to
+   * @param handler - The callback function to invoke when the event is published
+   * @returns Unsubscribe function
+   */
+  subscribe<T extends EventType>(
+    event: T,
+    handler: EventHandler<EventPayload[T]>
+  ): () => void {
+    if (!this.handlers.has(event)) {
+      this.handlers.set(event, new Set());
+    }
+
+    this.handlers.get(event)!.add(handler as EventHandler);
+
+    // Return unsubscribe function
+    return () => {
+      this.unsubscribe(event, handler as EventHandler);
+    };
   }
 
-  emit<E extends EventKey>(event: E, ...args: Parameters<Handler<E>>): void {
-    this.emitter.emit(event, ...args);
-  }
+  /**
+   * Unsubscribe from an event
+   * @param event - The event type to unsubscribe from
+   * @param handler - The callback function to remove
+   */
+  unsubscribe<T extends EventType>(
+    event: T,
+    handler: EventHandler<EventPayload[T]>
+  ): void {
+    const eventHandlers = this.handlers.get(event);
+    if (eventHandlers) {
+      eventHandlers.delete(handler as EventHandler);
 
-  removeAllListeners(event?: EventKey): void {
-    if (event) {
-      this.emitter.removeAllListeners(event);
-    } else {
-      this.emitter.removeAllListeners();
+      // Clean up empty handler sets
+      if (eventHandlers.size === 0) {
+        this.handlers.delete(event);
+      }
     }
   }
+
+  /**
+   * Publish an event to all subscribers
+   * @param event - The event type to publish
+   * @param payload - The event payload data
+   */
+  publish<T extends EventType>(
+    event: T,
+    payload: EventPayload[T]
+  ): void {
+    const eventHandlers = this.handlers.get(event);
+    if (eventHandlers) {
+      eventHandlers.forEach(handler => {
+        try {
+          handler(payload);
+        } catch (error) {
+          console.error(`Error in event handler for '${event}':`, error);
+        }
+      });
+    }
+  }
+
+  /**
+   * Subscribe to an event only once (auto-unsubscribes after first invocation)
+   * @param event - The event type to subscribe to
+   * @param handler - The callback function to invoke once
+   * @returns Unsubscribe function
+   */
+  once<T extends EventType>(
+    event: T,
+    handler: EventHandler<EventPayload[T]>
+  ): () => void {
+    const wrappedHandler: EventHandler<EventPayload[T]> = (payload) => {
+      // Unsubscribe before calling the handler to prevent issues if handler throws
+      this.unsubscribe(event, wrappedHandler);
+      handler(payload);
+    };
+
+    return this.subscribe(event, wrappedHandler);
+  }
 }
 
-export const eventBus = new TypedEventEmitter();
+// Singleton instance for application-wide use
+let defaultEventBus: EventBus | null = null;
+
+export function getEventBus(): EventBus {
+  if (!defaultEventBus) {
+    defaultEventBus = new EventBus();
+  }
+  return defaultEventBus;
+}
+
+export function resetEventBus(): void {
+  defaultEventBus = null;
+}

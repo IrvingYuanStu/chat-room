@@ -1,116 +1,146 @@
-// ===== User & Node =====
+/**
+ * Type definitions for Chat Room application
+ */
 
-/** User unique identifier, UUID generated on first launch, persisted in config */
-export type UserId = string;
+// ============ Config Types ============
 
-/** Peer network address */
-export interface PeerAddress {
-  ip: string;
-  port: number;
-}
-
-// ===== Config Model =====
-
-/** Global config file ~/.chat-room/config.json */
-export interface AppConfig {
-  userId: UserId;
-  nickname: string;
+export interface Config {
   zkAddresses: string[];
-  p2pPort: number;
-  currentRoomId: string | null;
+  currentRoomId: string;
+  nickname: string;
   recentRooms: string[];
+  port: number;
+  dataDir: string;
+  logDir: string;
+  logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 
-// ===== Chat Room & Member =====
-
-export type MemberStatus = "online" | "offline";
+// ============ Member Types ============
 
 export interface Member {
-  userId: UserId;
+  userId: string;
   nickname: string;
-  status: MemberStatus;
-  address: PeerAddress;
-  joinedAt: number; // Unix timestamp (ms)
+  status: 'online' | 'offline';
+  ip: string;
+  port: number;
+  joinedAt: number;
 }
 
-export interface Room {
-  roomId: string;
-  members: Map<UserId, Member>;
-  createdAt: number;
+export interface MemberNodeData {
+  nickname: string;
+  status: 'online';
+  ip: string;
+  port: number;
+  userId: string;
+  joinedAt: number;
 }
 
-export interface RoomInfo {
-  roomId: string;
-  memberCount: number;
-}
+// ============ Message Types ============
 
-// ===== Message Model =====
+export type MessageType = 'normal' | 'system' | 'mention' | 'reply';
 
-export type MessageType = "text" | "system" | "join" | "leave" | "rename" | "reply";
-
-export interface ReplyToInfo {
-  messageId: string;
-  senderNickname: string;
-  content: string;
+export interface ReplyInfo {
+  originalMessageId: string;
+  originalSenderNickname: string;
+  originalContent: string;
 }
 
 export interface ChatMessage {
   id: string;
   type: MessageType;
-  senderId: UserId;
+  roomId: string;
+  senderId: string;
   senderNickname: string;
   content: string;
-  roomId: string;
   timestamp: number;
-  replyTo?: ReplyToInfo;
-  mentions?: UserId[];
+  replyTo?: ReplyInfo;
+  mentions?: string[];
 }
 
-// ===== P2P Protocol Model =====
+// ============ Room Types ============
 
-export interface P2PProtocolMessage {
-  version: 1;
-  type: P2PMessageType;
-  payload: unknown;
-  timestamp: number;
-  senderId: UserId;
-}
-
-export type P2PMessageType =
-  | "handshake"
-  | "chat"
-  | "join"
-  | "leave"
-  | "rename"
-  | "sync-request"
-  | "sync-response"
-  | "heartbeat"
-  | "ack";
-
-export interface HandshakePayload {
-  userId: UserId;
-  nickname: string;
+export interface Room {
   roomId: string;
-  address: PeerAddress;
-}
-
-export interface HandshakeResponsePayload {
-  userId: UserId;
-  nickname: string;
-  roomId: string;
-  address: PeerAddress;
   members: Member[];
+  createdAt: Date;
 }
 
-export interface HeartbeatPayload {
-  sequence: number;
+// ============ P2P Message Types ============
+
+export type P2PMessageType = 'chat' | 'join' | 'leave' | 'nick_change' | 'ping' | 'pong';
+
+export interface ChatPayload {
+  messageId: string;
+  content: string;
+  replyTo?: ReplyPayload;
+  mentions?: string[];
 }
 
-// ===== ZK Member Info (stored as JSON in ZK node data) =====
+export interface ReplyPayload {
+  originalMessageId: string;
+  originalSenderNickname: string;
+  originalContent: string;
+}
 
-export interface MemberInfo {
-  nickname: string;
-  status: MemberStatus;
+export interface JoinPayload {
   ip: string;
   port: number;
+}
+
+export interface NickChangePayload {
+  oldNickname: string;
+  newNickname: string;
+}
+
+export interface P2PMessage {
+  type: P2PMessageType;
+  senderId: string;
+  senderNickname: string;
+  roomId: string;
+  timestamp: number;
+  payload: ChatPayload | JoinPayload | NickChangePayload | Record<string, unknown>;
+}
+
+// ============ Event Types ============
+
+export type EventType =
+  | 'message'
+  | 'member_join'
+  | 'member_leave'
+  | 'nick_change'
+  | 'room_joined'
+  | 'room_left'
+  | 'zk_connected'
+  | 'zk_disconnected'
+  | 'zk_reconnected'
+  | 'zk_session_expired'
+  | 'warning'
+  | 'error';
+
+export interface EventPayload {
+  message: ChatMessage;
+  member_join: Member;
+  member_leave: { userId: string };
+  nick_change: { userId: string; oldNickname: string; newNickname: string };
+  room_joined: { roomId: string };
+  room_left: { roomId: string };
+  zk_connected: void;
+  zk_disconnected: void;
+  zk_reconnected: void;
+  zk_session_expired: void;
+  warning: { message: string };
+  error: { error: Error };
+}
+
+// ============ CLI Types ============
+
+export interface CLIOptions {
+  'zk-addresses': string;
+  port: number;
+  config: string;
+  nickname: string;
+  'data-dir': string;
+  'log-dir': string;
+  'log-level': 'debug' | 'info' | 'warn' | 'error';
+  help: boolean;
 }

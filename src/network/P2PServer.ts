@@ -1,94 +1,144 @@
-import net from "node:net";
-import type { Server } from "node:net";
-import { PeerConnection } from "./PeerConnection.js";
-import type { PeerAddress, UserId } from "../services/types.js";
+/**
+ * P2P Server
+ * TCP server for handling incoming peer connections and messages
+ */
 
-type ConnectionCallback = (connection: PeerConnection) => void;
-
-const PORT_MIN = 9001;
-const PORT_MAX = 9010;
+import * as net from 'net';
+import { P2PTransport } from './P2PTransport';
+import { P2PMessage } from '../services/types';
 
 export class P2PServer {
-  private server: Server | null = null;
-  private port: number = PORT_MIN;
-  private connectionCallback: ConnectionCallback | null = null;
-  private activeConnections: PeerConnection[] = [];
+  private server: net.Server | null = null;
+  private transport: P2PTransport;
+  private messageHandlers: Array<(message: P2PMessage, socket: net.Socket) => void> = [];
+  private connectionHandlers: Array<(socket: net.Socket) => void> = [];
 
-  // Local peer info for creating PeerConnection instances
-  private localUserId: UserId;
-  private localNickname: string;
-  private localRoomId: string;
-  private localAddress: PeerAddress;
-
-  constructor(
-    localUserId: UserId,
-    localNickname: string,
-    localRoomId: string,
-    localAddress: PeerAddress,
-  ) {
-    this.localUserId = localUserId;
-    this.localNickname = localNickname;
-    this.localRoomId = localRoomId;
-    this.localAddress = localAddress;
+  constructor(transport: P2PTransport) {
+    this.transport = transport;
   }
 
-  start(port: number = PORT_MIN): Promise<number> {
-    this.port = port;
-
+  /**
+   * Start the TCP server on the specified port
+   * @param port Port number to listen on
+   */
+  async start(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
       this.server = net.createServer((socket) => {
-        const connection = new PeerConnection(
-          socket,
-          this.localUserId,
-          this.localNickname,
-          this.localRoomId,
-          this.localAddress,
-        );
-
-        this.activeConnections.push(connection);
-
-        connection.onClose(() => {
-          const idx = this.activeConnections.indexOf(connection);
-          if (idx !== -1) {
-            this.activeConnections.splice(idx, 1);
-          }
-        });
-
-        this.connectionCallback?.(connection);
+        this.handleConnection(socket);
       });
 
-      this.server.on("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EADDRINUSE" && this.port < PORT_MAX) {
-          this.port++;
-          this.server!.listen(this.port, "0.0.0.0");
-        } else {
-          reject(err);
-        }
+      this.server.on('error', (err) => {
+        reject(err);
       });
 
-      this.server.listen(this.port, "0.0.0.0", () => {
-        resolve(this.port);
+      this.server.listen(port, () => {
+        resolve();
       });
     });
   }
 
-  onConnection(callback: ConnectionCallback): void {
-    this.connectionCallback = callback;
+  /**
+   * Stop the TCP server
+   */
+  async stop(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.server) {
+        this.server.close(() => {
+          this.server = null;
+          resolve();
+        });
+      } else {
+        resolve();
+      }
+    });
   }
 
-  getPort(): number {
-    return this.port;
+  /**
+   * Register a handler for incoming messages
+   * @param callback Function to call when message is received
+   * @returns Unsubscribe function
+   */
+  onMessage(callback: (message: P2PMessage, socket: net.Socket) => void): () => void {
+    this.messageHandlers.push(callback);
+    // Return unsubscribe function
+    return () => {
+      const index = this.messageHandlers.indexOf(callback);
+      if (index !== -1) {
+        this.messageHandlers.splice(index, 1);
+      }
+    };
   }
 
-  stop(): void {
-    for (const connection of this.activeConnections) {
-      connection.destroy();
-    }
-    this.activeConnections = [];
+  /**
+   * Clear all message handlers
+   */
+  clearMessageHandlers(): void {
+    this.messageHandlers = [];
+  }
 
-    if (this.server) {
-      this.server.close();
-      this.server = null;
-    }
+  /**
+   * Register a handler for new connections
+   * @param callback Function to call when a new peer connects
+   * @returns Unsubscribe function
+   */
+  onConnection(callback: (socket: net.Socket) => void): () => void {
+    this.connectionHandlers.push(callback);
+    // Return unsubscribe function
+    return () => {
+      const index = this.connectionHandlers.indexOf(callback);
+      if (index !== -1) {
+        this.connectionHandlers.splice(index, 1);
+      }
+    };
+  }
+
+  /**
+   * Handle a new peer connection
+   * @param socket The connected socket
+   */
+  private handleConnection(socket: net.Socket): void {
+    // Notify connection handlers
+    this.connectionHandlers.forEach((handler) => handler(socket));
+
+    let buffer = Buffer.alloc(0);
+
+    socket.on('data', (data: Buffer) => {
+      // Accumulate data
+      buffer = Buffer.concat([buffer, data]);
+
+      // Process complete messages
+      while (buffer.length >= 6) {
+        // Read length from header (bytes 2-5)
+        const payloadLength = buffer.readUInt32BE(2);
+        const totalMessageLength = 6 + payloadLength;
+
+        // Check if we have a complete message
+        if (buffer.length < totalMessageLength) {
+          break;
+        }
+
+        // Extract and decode message
+        const messageBuffer = buffer.slice(0, totalMessageLength);
+        try {
+          const message = this.transport.decode(messageBuffer);
+
+          // Notify message handlers
+          this.messageHandlers.forEach((handler) => handler(message, socket));
+        } catch (err) {
+          console.error('Failed to decode message:', err);
+        }
+
+        // Remove processed message from buffer
+        buffer = buffer.slice(totalMessageLength);
+      }
+    });
+
+    socket.on('error', (err) => {
+      console.error('Socket error:', err);
+    });
+
+    socket.on('close', () => {
+      // Socket closed
+    });
   }
 }

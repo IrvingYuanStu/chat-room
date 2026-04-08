@@ -1,241 +1,202 @@
-import { useState, useEffect } from "react";
-import { Box, Text, Spacer } from "ink";
-import TextInput from "ink-text-input";
-import type { AppConfig } from "../../services/types.js";
-import { ConfigService } from "../../services/ConfigService.js";
+/**
+ * ConfigScreen Component - Configuration screen for first-time setup
+ * M1.8.1: First startup configuration interface
+ */
 
-interface ConfigScreenProps {
-  configService: ConfigService;
-  existingConfig: AppConfig | null;
-  onComplete: () => void;
+import React, { useState, useEffect } from 'react';
+import { Box, Text } from 'ink';
+import TextInput from 'ink-text-input';
+import { Config } from '../../services/types';
+
+export interface ConfigScreenProps {
+  onConfigComplete: (config: Config) => void;
+  initialConfig?: Partial<Config>;
 }
 
-export function ConfigScreen({ configService, existingConfig, onComplete }: ConfigScreenProps) {
-  const [step, setStep] = useState<"zk" | "nickname" | "confirm" | "done">(
-    existingConfig ? "confirm" : "zk"
+/**
+ * Generate a default nickname with random suffix
+ */
+function generateDefaultNickname(): string {
+  const randomNum = Math.floor(100 + Math.random() * 900);
+  return `User${randomNum}`;
+}
+
+/**
+ * Validate address format (host:port)
+ */
+function isValidAddressFormat(address: string): boolean {
+  return /^\d+\.\d+\.\d+\.\d+:\d+$/.test(address) || /^[\w.-]+:\d+$/.test(address);
+}
+
+/**
+ * ConfigScreen - Configuration interface for first-time users
+ */
+export const ConfigScreen: React.FC<ConfigScreenProps> = ({
+  onConfigComplete,
+  initialConfig
+}) => {
+  const [zkAddressInput, setZkAddressInput] = useState<string>(
+    initialConfig?.zkAddresses?.join(', ') || '127.0.0.1:2181'
   );
-  const [zkAddresses, setZkAddresses] = useState(
-    existingConfig?.zkAddresses.join(",") || ""
+  const [nickname, setNickname] = useState<string>(
+    initialConfig?.nickname || generateDefaultNickname()
   );
-  const [nickname, setNickname] = useState(existingConfig?.nickname || "");
-  const [error, setError] = useState<string | null>(null);
+  const [step, setStep] = useState<'zk' | 'nickname' | 'confirm'>('zk');
+  const [error, setError] = useState<string>('');
 
-  // For edit mode
-  const [editingField, setEditingField] = useState<"zk" | "nickname" | null>(null);
-
-  useEffect(() => {
-    if (step === "done") {
-      onComplete();
-    }
-  }, [step, onComplete]);
-
-  const handleZkSubmit = async (value: string) => {
-    // Validate ZK addresses
-    const addresses = value.split(",").map((a) => a.trim()).filter((a) => a);
+  // Handle ZooKeeper address submission
+  const handleZkSubmit = () => {
+    const addresses = zkAddressInput.split(',').map(s => s.trim()).filter(Boolean);
 
     if (addresses.length === 0) {
-      setError("请至少输入一个 ZooKeeper 地址");
+      setError('Please enter at least one ZooKeeper address');
       return;
     }
 
-    // Basic validation
-    const isValid = addresses.every((addr) => {
-      const parts = addr.split(":");
-      if (parts.length !== 2) return false;
-      const host = parts[0];
-      const port = parseInt(parts[1], 10);
-      return host.length > 0 && !isNaN(port) && port > 0 && port < 65536;
-    });
-
-    if (!isValid) {
-      setError("地址格式无效，应为 host:port，多个地址用逗号分隔");
-      return;
-    }
-
-    setZkAddresses(value);
-    setError(null);
-    setStep("nickname");
-  };
-
-  const handleNicknameSubmit = async (value: string) => {
-    // Validate nickname
-    const trimmed = value.trim();
-
-    if (trimmed.length === 0) {
-      setError("昵称不能为空");
-      return;
-    }
-
-    if (trimmed.length > 20) {
-      setError("昵称不能超过 20 个字符");
-      return;
-    }
-
-    // Check for special characters (allow letters, numbers, Chinese, and basic symbols)
-    const isValid = /^[\u4e00-\u9fa5a-zA-Z0-9_-]+$/.test(trimmed);
-
-    if (!isValid) {
-      setError("昵称只能包含中文、字母、数字、下划线和连字符");
-      return;
-    }
-
-    setNickname(trimmed);
-    setError(null);
-    setStep("confirm");
-  };
-
-  const handleConfirmSave = async () => {
-    try {
-      const addresses = zkAddresses.split(",").map((a) => a.trim()).filter((a) => a);
-
-      if (existingConfig) {
-        // Update existing config
-        await configService.init(addresses, nickname);
-      } else {
-        // Create new config
-        await configService.init(addresses, nickname);
+    for (const addr of addresses) {
+      if (!isValidAddressFormat(addr)) {
+        setError(`Invalid address format: ${addr}. Expected format: host:port`);
+        return;
       }
+    }
 
-      setStep("done");
-    } catch (err) {
-      setError(`保存配置失败: ${err instanceof Error ? err.message : String(err)}`);
+    setError('');
+    setStep('nickname');
+  };
+
+  // Handle nickname submission
+  const handleNicknameSubmit = () => {
+    if (!nickname.trim()) {
+      setError('Please enter a nickname');
+      return;
+    }
+
+    if (nickname.length > 32) {
+      setError('Nickname must be 32 characters or less');
+      return;
+    }
+
+    setError('');
+    setStep('confirm');
+  };
+
+  // Handle final confirmation
+  const handleConfirm = () => {
+    const addresses = zkAddressInput.split(',').map(s => s.trim()).filter(Boolean);
+
+    const config: Config = {
+      zkAddresses: addresses,
+      currentRoomId: initialConfig?.currentRoomId || '',
+      nickname: nickname.trim(),
+      recentRooms: initialConfig?.recentRooms || [],
+      port: initialConfig?.port || 9001,
+      dataDir: initialConfig?.dataDir || '/tmp/chat-room',
+      logDir: initialConfig?.logDir || '/tmp/chat-room/logs',
+      logLevel: initialConfig?.logLevel || 'info'
+    };
+
+    onConfigComplete(config);
+  };
+
+  // Handle key press for navigation
+  const handleKeyPress = (key: string) => {
+    if (key === 'enter') {
+      if (step === 'zk') {
+        handleZkSubmit();
+      } else if (step === 'nickname') {
+        handleNicknameSubmit();
+      }
     }
   };
 
-  const handleEditZk = () => {
-    setEditingField("zk");
-    setStep("zk");
-  };
-
-  const handleEditNickname = () => {
-    setEditingField("nickname");
-    setStep("nickname");
-  };
-
-  const handleSkipEdit = () => {
-    setStep("done");
-  };
-
-  // Input field for ZK addresses
-  if (step === "zk") {
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <Box marginBottom={1}>
-          <Text bold>配置 ZooKeeper 地址</Text>
-        </Box>
-
-        <Box marginBottom={1}>
-          <Text>请输入 ZooKeeper 集群地址，格式: host:port</Text>
-        </Box>
-
-        <Box marginBottom={1}>
-          <Text>多个地址用逗号分隔，例如: 127.0.0.1:2181,127.0.0.1:2182</Text>
-        </Box>
-
-        <Box marginBottom={1}>
-          <Text color="blue">{'>'} ZooKeeper 地址: </Text>
-          <TextInput
-            value={zkAddresses}
-            onChange={setZkAddresses}
-            onSubmit={handleZkSubmit}
-            placeholder="127.0.0.1:2181"
-          />
-        </Box>
-
-        {error && (
-          <Box>
-            <Text color="red">✗ {error}</Text>
-          </Box>
-        )}
-      </Box>
-    );
-  }
-
-  // Input field for nickname
-  if (step === "nickname") {
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <Box marginBottom={1}>
-          <Text bold>配置昵称</Text>
-        </Box>
-
-        <Box marginBottom={1}>
-          <Text>请输入您的显示昵称 (1-20 个字符)</Text>
-        </Box>
-
-        <Box marginBottom={1}>
-          <Text color="blue">{'>'} 昵称: </Text>
-          <TextInput
-            value={nickname}
-            onChange={setNickname}
-            onSubmit={handleNicknameSubmit}
-            placeholder="张三"
-          />
-        </Box>
-
-        {error && (
-          <Box>
-            <Text color="red">✗ {error}</Text>
-          </Box>
-        )}
-      </Box>
-    );
-  }
-
-  // Confirmation screen
-  if (step === "confirm") {
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <Box marginBottom={1}>
-          <Text bold>配置确认</Text>
-        </Box>
-
-        <Box flexDirection="column" marginBottom={1}>
-          <Box marginBottom={1}>
-            <Text>ZooKeeper 地址:</Text>
-            <Spacer />
-            <Text color="cyan">{zkAddresses}</Text>
-          </Box>
-
-          <Box marginBottom={1}>
-            <Text>昵称:</Text>
-            <Spacer />
-            <Text color="cyan">{nickname}</Text>
-          </Box>
-
-          {existingConfig && (
-            <Box marginBottom={1}>
-              <Text>用户 ID:</Text>
-              <Spacer />
-              <Text color="gray">{existingConfig.userId.substring(0, 8)}...</Text>
-            </Box>
-          )}
-        </Box>
-
-        {error && (
-          <Box marginBottom={1}>
-            <Text color="red">✗ {error}</Text>
-          </Box>
-        )}
-
-        <Box marginBottom={1}>
-          <Text dimColor>按 Enter 确认保存，Esc 重新输入</Text>
-        </Box>
-
-        <TextInput
-          value=""
-          onChange={() => {}}
-          onSubmit={handleConfirmSave}
-          placeholder="按 Enter 确认..."
-        />
-      </Box>
-    );
-  }
-
-  // Loading/done state
   return (
-    <Box paddingX={2}>
-      <Text color="green">✓ 配置已保存</Text>
+    <Box flexDirection="column" padding={1}>
+      {/* Title */}
+      <Box>
+        <Text bold>Chat Room Configuration</Text>
+      </Box>
+
+      <Box marginY={1}>
+        <Text dimColor>{"=".repeat(40)}</Text>
+      </Box>
+
+      {/* Step 1: ZooKeeper Address */}
+      {step === 'zk' && (
+        <Box flexDirection="column">
+          <Box marginBottom={1}>
+            <Text>Enter ZooKeeper addresses:</Text>
+          </Box>
+          <Box marginLeft={2}>
+            <Text dimColor>Multiple addresses separated by comma</Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text>{"> "}</Text>
+            <TextInput
+              value={zkAddressInput}
+              onChange={setZkAddressInput}
+              onSubmit={handleZkSubmit}
+              placeholder="127.0.0.1:2181"
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text dimColor>Press Enter to continue</Text>
+          </Box>
+        </Box>
+      )}
+
+      {/* Step 2: Nickname */}
+      {step === 'nickname' && (
+        <Box flexDirection="column">
+          <Box marginBottom={1}>
+            <Text>Enter your nickname:</Text>
+          </Box>
+          <Box marginLeft={2}>
+            <Text dimColor>Max 32 characters</Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text>{"> "}</Text>
+            <TextInput
+              value={nickname}
+              onChange={setNickname}
+              onSubmit={handleNicknameSubmit}
+              placeholder="User001"
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text dimColor>Press Enter to continue</Text>
+          </Box>
+        </Box>
+      )}
+
+      {/* Step 3: Confirm */}
+      {step === 'confirm' && (
+        <Box flexDirection="column">
+          <Box marginBottom={1}>
+            <Text bold>Configuration Summary:</Text>
+          </Box>
+          <Box marginLeft={2} marginY={0}>
+            <Text dimColor>ZooKeeper: </Text>
+            <Text>{zkAddressInput}</Text>
+          </Box>
+          <Box marginLeft={2} marginY={0}>
+            <Text dimColor>Nickname: </Text>
+            <Text>{nickname}</Text>
+          </Box>
+
+          <Box marginTop={2}>
+            <Text dimColor>Press Enter to confirm or Esc to go back</Text>
+          </Box>
+        </Box>
+      )}
+
+      {/* Error Display */}
+      {error && (
+        <Box marginTop={1}>
+          <Text color="red">{error}</Text>
+        </Box>
+      )}
     </Box>
   );
-}
+};
+
+export default ConfigScreen;

@@ -1,144 +1,239 @@
-import type { Member, UserId } from "./types.js";
-import { eventBus } from "./EventBus.js";
+import { Member, MemberNodeData } from './types';
+import { EventBus } from './EventBus';
+
+/**
+ * MemberService - Manages chat room members and their online status
+ *
+ * Handles member join/leave events, online status tracking,
+ * and nickname changes. Publishes events to the EventBus for UI updates.
+ */
+
+// ZKClient interface for dependency injection
+export interface ZKClientInterface {
+  setMemberData(roomId: string, userId: string, data: MemberNodeData): Promise<void>;
+}
+
+// PeerService interface for dependency injection
+export interface PeerServiceInterface {
+  broadcast(message: { type: string; senderId: string; senderNickname: string; roomId: string; timestamp: number; payload: any }): void;
+}
 
 export class MemberService {
-  private members: Map<string, Map<UserId, Member>> = new Map();
+  private members: Map<string, Member>;
+  private eventBus: EventBus;
+  private zkClient: ZKClientInterface | null;
+  private peerService: PeerServiceInterface | null;
+  private currentRoomId: string = '';
+
+  constructor(eventBus: EventBus, zkClient?: ZKClientInterface, peerService?: PeerServiceInterface) {
+    this.members = new Map();
+    this.eventBus = eventBus;
+    this.zkClient = zkClient || null;
+    this.peerService = peerService || null;
+  }
 
   /**
-   * Sync members list (called from ZK watcher callback)
+   * Get all members, sorted by joinedAt descending (newest first)
+   * Returns copies to prevent external mutation
    */
-  async syncMembers(roomId: string, newMembers: Member[]): Promise<void> {
-    console.log(`[MemberService] syncMembers called for ${roomId}: ${newMembers.length} members`);
-    const currentMembers = this.members.get(roomId) || new Map<UserId, Member>();
-    const newMembersMap = new Map(newMembers.map((m) => [m.userId, m]));
+  getMembers(): Member[] {
+    const membersArray = Array.from(this.members.values());
+    return membersArray
+      .sort((a, b) => b.joinedAt - a.joinedAt)
+      .map(member => ({ ...member }));
+  }
 
-    const added: Member[] = [];
-    const removed: UserId[] = [];
+  /**
+   * Get a specific member by userId
+   * Returns a copy to prevent external mutation
+   */
+  getMember(userId: string): Member | undefined {
+    const member = this.members.get(userId);
+    return member ? { ...member } : undefined;
+  }
 
-    // Find new members
-    for (const [userId, member] of newMembersMap) {
-      if (!currentMembers.has(userId)) {
-        added.push(member);
+  /**
+   * Check if a member is currently online
+   */
+  isOnline(userId: string): boolean {
+    const member = this.members.get(userId);
+    return member?.status === 'online';
+  }
+
+  /**
+   * Handle a member joining the chat room
+   * Updates existing member or adds new member, then publishes member_join event
+   */
+  onMemberJoin(member: Member): void {
+    // Update existing member or add new one
+    // For new members, default status to 'online' if not specified
+    const existingMember = this.members.get(member.userId);
+    const status = existingMember
+      ? member.status
+      : (member.status || 'online');
+
+    this.members.set(member.userId, {
+      ...member,
+      status,
+    });
+
+    // Publish member join event
+    this.eventBus.publish('member_join', member);
+  }
+
+  /**
+   * Handle a member leaving the chat room
+   * Removes member from the list and publishes member_leave event
+   */
+  onMemberLeave(userId: string): void {
+    // Check if member exists
+    if (!this.members.has(userId)) {
+      return;
+    }
+
+    // Remove member from map
+    this.members.delete(userId);
+
+    // Publish member leave event
+    this.eventBus.publish('member_leave', { userId });
+  }
+
+  /**
+   * Update all members from ZK sync
+   * Replaces all current members with the provided list
+   */
+  updateMembers(members: Member[]): void {
+    // Clear existing members
+    this.members.clear();
+
+    // Add all new members
+    for (const member of members) {
+      this.members.set(member.userId, member);
+    }
+  }
+
+  /**
+   * Set the current room ID for ZK operations
+   */
+  setCurrentRoomId(roomId: string): void {
+    this.currentRoomId = roomId;
+  }
+
+  /**
+   * Get the current room ID
+   */
+  getCurrentRoomId(): string {
+    return this.currentRoomId;
+  }
+
+  /**
+   * Rename a member's nickname
+   * Updates the member data, ZK node, and broadcasts to peers
+   *
+   * M3.4.2: Update ZK node data when renaming
+   * M3.4.3: Broadcast nickname change via PeerService
+   */
+  async rename(userId: string, newNickname: string): Promise<void> {
+    const member = this.members.get(userId);
+    if (!member) {
+      throw new Error(`Member not found: ${userId}`);
+    }
+
+    const oldNickname = member.nickname;
+
+    // Update member nickname locally
+    this.members.set(userId, {
+      ...member,
+      nickname: newNickname,
+    });
+
+    // M3.4.2: Update ZK node data if zkClient is available
+    if (this.zkClient && this.currentRoomId) {
+      try {
+        const nodeData: MemberNodeData = {
+          nickname: newNickname,
+          status: 'online',
+          ip: member.ip,
+          port: member.port,
+          userId: member.userId,
+          joinedAt: member.joinedAt,
+        };
+        await this.zkClient.setMemberData(this.currentRoomId, userId, nodeData);
+      } catch (error) {
+        // Log error but continue with local update and broadcast
+        console.error('Failed to update ZK node data:', error);
       }
     }
 
-    // Find removed members
-    for (const userId of currentMembers.keys()) {
-      if (!newMembersMap.has(userId)) {
-        removed.push(userId);
+    // M3.4.3: Broadcast nickname change via PeerService
+    if (this.peerService) {
+      try {
+        this.peerService.broadcast({
+          type: 'nick_change',
+          senderId: userId,
+          senderNickname: oldNickname,
+          roomId: this.currentRoomId,
+          timestamp: Date.now(),
+          payload: {
+            oldNickname,
+            newNickname,
+          },
+        });
+      } catch (error) {
+        // Log error but continue
+        console.error('Failed to broadcast nick_change:', error);
       }
     }
 
-    console.log(`[MemberService] Added: ${added.map(m => m.nickname).join(", ")}, Removed: ${removed.join(", ")}`);
+    // Publish local nick change event for UI update
+    this.eventBus.publish('nick_change', {
+      userId,
+      oldNickname,
+      newNickname,
+    });
+  }
 
-    // Update members map
-    for (const member of added) {
-      this.addMember(roomId, member);
+  /**
+   * Force a member to go offline (used for testing or timeout scenarios)
+   * Sets status to 'offline' instead of removing them
+   */
+  forceOffline(userId: string): void {
+    const member = this.members.get(userId);
+    if (!member) {
+      return;
     }
 
-    for (const userId of removed) {
-      this.markOffline(roomId, userId);
-    }
-
-    // Emit event if there were changes
-    if (added.length > 0 || removed.length > 0) {
-      console.log(`[MemberService] Emitting members-changed event for ${roomId}`);
-      eventBus.emit("members-changed", roomId);
-    }
+    this.members.set(userId, {
+      ...member,
+      status: 'offline',
+    });
   }
 
   /**
-   * Add a single member
+   * Broadcast current user's status to other members
+   * Called when joining a room or when status changes
    */
-  addMember(roomId: string, member: Member): void {
-    console.log(`[MemberService] addMember called for ${roomId}: ${member.nickname} (${member.userId})`);
-    if (!this.members.has(roomId)) {
-      this.members.set(roomId, new Map());
-      console.log(`[MemberService] Created new members map for ${roomId}`);
-    }
-    this.members.get(roomId)!.set(member.userId, member);
-    console.log(`[MemberService] Member added. Map size now: ${this.members.get(roomId)!.size}`);
+  broadcastStatus(): void {
+    // This method is a placeholder for P2P status broadcasting
+    // Actual implementation would use PeerService to broadcast
   }
 
   /**
-   * Mark member as offline
+   * Create Member data for ZK node creation
    */
-  markOffline(roomId: string, userId: string): void {
-    const roomMembers = this.members.get(roomId);
-    if (!roomMembers) return;
-
-    const member = roomMembers.get(userId);
-    if (member) {
-      member.status = "offline";
-    }
-  }
-
-  /**
-   * Update member nickname
-   */
-  updateNickname(roomId: string, userId: string, nickname: string): void {
-    const roomMembers = this.members.get(roomId);
-    if (!roomMembers) return;
-
-    const member = roomMembers.get(userId);
-    if (member) {
-      member.nickname = nickname;
-    }
-
-    // Emit event
-    eventBus.emit("members-changed", roomId);
-  }
-
-  /**
-   * Get all members in a room
-   */
-  getMembers(roomId: string): Member[] {
-    const roomMembers = this.members.get(roomId);
-    if (!roomMembers) return [];
-    return Array.from(roomMembers.values());
-  }
-
-  /**
-   * Get online members in a room
-   */
-  getOnlineMembers(roomId: string): Member[] {
-    return this.getMembers(roomId).filter((m) => m.status === "online");
-  }
-
-  /**
-   * Get member count in a room
-   */
-  getMemberCount(roomId: string): number {
-    const roomMembers = this.members.get(roomId);
-    const count = roomMembers?.size || 0;
-    console.log(`[MemberService] getMemberCount for ${roomId}: ${count} members (map exists: ${!!roomMembers})`);
-    if (roomMembers && roomMembers.size > 0) {
-      console.log(`[MemberService] Members in map:`, Array.from(roomMembers.keys()));
-    }
-    return count;
-  }
-
-  /**
-   * Get member by user ID
-   */
-  getMemberByUserId(roomId: string, userId: string): Member | undefined {
-    const roomMembers = this.members.get(roomId);
-    if (!roomMembers) return undefined;
-    return roomMembers.get(userId);
-  }
-
-  /**
-   * Remove all members for a room (when leaving)
-   */
-  clearRoom(roomId: string): void {
-    this.members.delete(roomId);
-  }
-
-  /**
-   * Check if a member exists in a room
-   */
-  hasMember(roomId: string, userId: string): boolean {
-    const roomMembers = this.members.get(roomId);
-    return roomMembers?.has(userId) ?? false;
+  static createMemberNodeData(
+    nickname: string,
+    ip: string,
+    port: number,
+    userId: string
+  ): MemberNodeData {
+    return {
+      nickname,
+      status: 'online',
+      ip,
+      port,
+      userId,
+      joinedAt: Date.now(),
+    };
   }
 }
