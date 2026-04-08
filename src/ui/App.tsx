@@ -3,7 +3,7 @@
  * M1.8.4: Route between ConfigScreen, RoomSelectScreen, and ChatScreen
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Box } from 'ink';
 import { Config, Member } from '../services/types';
 import { EventBus, getEventBus } from '../services/EventBus';
@@ -89,6 +89,7 @@ export const App: React.FC<AppProps> = ({ initialConfig, zkClient, onQuitApp, in
   const [p2pTransport] = useState<P2PTransport>(() => new P2PTransport());
   const [p2pServer] = useState<P2PServer>(() => new P2PServer(p2pTransport));
   const [peerService, setPeerService] = useState<PeerService | null>(null);
+  const peerServiceRef = useRef<PeerService | null>(null);
   const [chatService, setChatService] = useState<ChatService | null>(null);
 
   // Initialize RoomService when zkClient and config are available
@@ -134,6 +135,16 @@ export const App: React.FC<AppProps> = ({ initialConfig, zkClient, onQuitApp, in
           currentMembers: [...prev.currentMembers, member]
         };
       });
+
+      // Connect to the new peer via P2P
+      if (member.userId !== userId && member.ip && member.port) {
+        const ps = peerServiceRef.current;
+        if (ps) {
+          ps.connectToPeer(member.ip, member.port).catch((error) => {
+            console.error(`Failed to connect to peer ${member.nickname} (${member.ip}:${member.port}):`, error);
+          });
+        }
+      }
     });
 
     const unsubscribeMemberLeave = eventBus.subscribe('member_leave', ({ userId: leaveUserId }: { userId: string }) => {
@@ -171,6 +182,7 @@ export const App: React.FC<AppProps> = ({ initialConfig, zkClient, onQuitApp, in
     if (state.config) {
       const port = state.config.port || 9001;
       const ps = new PeerService(p2pTransport, '127.0.0.1', port);
+      peerServiceRef.current = ps;
       setPeerService(ps);
     }
   }, [state.config, p2pTransport]);
@@ -251,6 +263,19 @@ export const App: React.FC<AppProps> = ({ initialConfig, zkClient, onQuitApp, in
         await roomService.joinRoom(roomId);
         // Get initial members from the service
         const members = memberService.getMembers();
+
+        // Connect to all existing peers via P2P
+        const ps = peerServiceRef.current;
+        if (ps) {
+          for (const member of members) {
+            if (member.userId !== userId && member.ip && member.port) {
+              ps.connectToPeer(member.ip, member.port).catch((error) => {
+                console.error(`Failed to connect to peer ${member.nickname} (${member.ip}:${member.port}):`, error);
+              });
+            }
+          }
+        }
+
         setState(prev => ({
           ...prev,
           screen: 'chat',
@@ -299,7 +324,22 @@ export const App: React.FC<AppProps> = ({ initialConfig, zkClient, onQuitApp, in
   };
 
   // Handle exit room
-  const handleExitRoom = () => {
+  const handleExitRoom = async () => {
+    // Leave room in ZooKeeper (deletes ephemeral node & notifies others)
+    if (roomService) {
+      try {
+        await roomService.leaveRoom();
+      } catch (error) {
+        // Best effort — proceed with local cleanup even if ZK delete fails
+      }
+    }
+
+    // Disconnect from all peers when leaving the room
+    const ps = peerServiceRef.current;
+    if (ps) {
+      ps.disconnectAll();
+    }
+
     setState(prev => ({
       ...prev,
       screen: 'roomSelect',
